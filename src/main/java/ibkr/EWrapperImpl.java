@@ -2,6 +2,8 @@ package ibkr;
 
 import com.ib.client.*;
 import com.ib.client.protobuf.*;
+import data.RequestTracker;
+import ibkr.model.ScanData;
 
 import java.util.List;
 import java.util.Map;
@@ -21,10 +23,14 @@ public class EWrapperImpl implements EWrapper {
     protected int currentOrderId = -1;
     //! [socket_declare]
 
+    private RequestTracker<ScanData> marketTracker;
+
+
     //! [socket_init]
-    public EWrapperImpl() {
+    public EWrapperImpl(RequestTracker<ScanData> marketTracker) {
         readerSignal = new EJavaSignal();
         clientSocket = new EClientSocket(this, readerSignal);
+        this.marketTracker = marketTracker;
     }
     //! [socket_init]
     public EClientSocket getClient() {
@@ -230,13 +236,22 @@ public class EWrapperImpl implements EWrapper {
     //! [scannerdata]
     @Override
     public void scannerData(int reqId, int rank, ContractDetails contractDetails, String distance, String benchmark, String projection, String legsStr) {
-        System.out.println("ScannerData: " + EWrapperMsgGenerator.scannerData(reqId, rank, contractDetails, distance, benchmark, projection, legsStr));
+        ScanData scanData = ScanData.builder().rank(rank)
+                .contractDetails(contractDetails)
+                .distance(distance)
+                .benchmark(benchmark)
+                .projection(projection)
+                .legsStr(legsStr)
+                .build();
+        marketTracker.add(reqId, scanData);
+//        System.out.println("ScannerData: " + EWrapperMsgGenerator.scannerData(reqId, rank, contractDetails, distance, benchmark, projection, legsStr));
     }
     //! [scannerdata]
 
     //! [scannerdataend]
     @Override
     public void scannerDataEnd(int reqId) {
+        marketTracker.complete(reqId);
         System.out.println("ScannerDataEnd: " + EWrapperMsgGenerator.scannerDataEnd(reqId));
     }
     //! [scannerdataend]
