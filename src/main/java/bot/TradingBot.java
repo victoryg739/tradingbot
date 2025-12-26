@@ -3,7 +3,9 @@ import com.ib.client.*;
 import com.ib.client.protobuf.*;
 import ibkr.EWrapperImpl;
 import ibkr.IBKRConnection;
+import ibkr.model.MarketDataInput;
 import ibkr.model.ScanData;
+import ibkr.model.TickPriceOutput;
 import strategy.LowFloatMomentum;
 import strategy.Strategy;
 
@@ -16,12 +18,11 @@ public class TradingBot{
     public static void main(String[] args) throws InterruptedException, ExecutionException, TimeoutException {
         IBKRConnection ibkrConnection = new IBKRConnection();
         ibkrConnection.onConnect();
-//        ibkrConnection.reqHistoricalData();
-//        ibkrConnection.reqMarketData();
-//        List<ScanData> scanData = ibkrConnection.marketScan();
+        ibkrConnection.reqMarketDataType(MarketDataType.DELAYED);
+
         Strategy myStrategy = new LowFloatMomentum(ibkrConnection);
 
-        myStrategy.buy();
+        myStrategy.run();
 
 //        ibkrConnection.onDisconnect();
 

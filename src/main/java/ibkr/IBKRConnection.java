@@ -1,8 +1,13 @@
 package ibkr;
 
 import com.ib.client.*;
+import com.sun.net.httpserver.Request;
 import data.RequestTracker;
+import data.RequestTrackerManager;
+import ibkr.model.HistoricalDataInput;
+import ibkr.model.MarketDataInput;
 import ibkr.model.ScanData;
+import ibkr.model.TickPriceOutput;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -13,13 +18,11 @@ public class IBKRConnection {
     private EWrapperImpl eWrapper;
     EJavaSignal eSignal = new EJavaSignal();
     private EReader reader;
-    private EClientSocket client;
-    private RequestTracker<ScanData> marketTracker;
+    private final EClientSocket client;
+    private final RequestTrackerManager requestTrackerManager = new RequestTrackerManager();
 
     public IBKRConnection() {
-        marketTracker = new RequestTracker<>();
-
-        eWrapper = new EWrapperImpl(marketTracker);
+        eWrapper = new EWrapperImpl(requestTrackerManager);
         client = new EClientSocket( eWrapper, eSignal);
 
     }
@@ -83,88 +86,64 @@ public class IBKRConnection {
         client.eDisconnect();
     }
 
-    public void reqMarketData(){
-        //        Contract c =  new Contract();
-//        //TODO: The contract is a class to include combo legs, delta neutral etc
-//
-//        final String ALL_GENERIC_TICK_TAGS = "100,101,104,106,165,221,232,236,258,293,294,295,318,411,460,619";
-//
-//        //https://interactivebrokers.github.io/tws-api/tick_types.html
-//        //  These are all the generic tick types that IBKR's API supports. IBKR defined this list — it's their official set of optional market data fields.
-//        //
-//        //  | ID            | Why Included                                |
-//        //  |---------------|---------------------------------------------|
-//        //  | 100, 101      | Options traders need volume & open interest |
-//        //  | 104, 106      | Volatility data for options pricing         |
-//        //  | 165           | Misc stats (avg volume) for analysis        |
-//        //  | 221           | Mark price for margin calculations          |
-//        //  | 232           | 13-week low for technical analysis          |
-//        //  | 236           | Shortable shares for short sellers          |
-//        //  | 258           | Fundamental data (P/E, EPS) for investors   |
-//        //  | 293, 294, 295 | Trade/volume rates for momentum analysis    |
-//        //  | 318           | Last RTH trade for overnight gaps           |
-//        //  | 411           | Real-time historical volatility             |
-//        //  | 460           | Bond factor (for fixed income)              |
-//        //  | 619           | IPO price estimates                         |
-//
-//        //market snapshot -  A market snapshot is a one-time quote instead of continuous streaming data.
-//        boolean marketSnapshot = false; //false means streaming
-//        boolean regulatorySnapshot = false;
-//        List<TagValue> marketDataOptions = new ArrayList<>();
-//        client.eConnect("127.0.0.1", 7497, 2);
-//        client.reqMktData(1, c, ALL_GENERIC_TICK_TAGS, marketSnapshot, regulatorySnapshot, marketDataOptions);
-//
-//        // Start the EReader thread - THIS IS CRITICAL
-//        final EReader reader = new EReader(client, signal);
-//        reader.start();
-//
+    public void reqMarketDataType(int marketDataType){
+        client.reqMarketDataType(marketDataType);
+    }
 
-//        // Define an actual contract
-//        Contract contract = new Contract();
-//        contract.symbol("AAPL");
+    public List<TickPriceOutput> reqMarketData(MarketDataInput marketDataInput) throws ExecutionException, InterruptedException, TimeoutException {
+        //Note: marketdata returns tick data and this tickData will go on forever as it is streaming
+        // For know the implementation is we just get one delayed price tick data will be sufficient
+        //TODO: In the future we can try to process on every tick data
+
+        RequestTracker<TickPriceOutput> tickPriceTracker = requestTrackerManager.getTracker(TickPriceOutput.class);
+        int reqId = tickPriceTracker.nextReqId();
+        CompletableFuture<List<TickPriceOutput>> completableFuture = new CompletableFuture<>();
+
+        tickPriceTracker.start(reqId, completableFuture);
+        client.reqMktData(reqId
+                , marketDataInput.getContract()
+                , marketDataInput.getGenericTickList()
+                , marketDataInput.isSnapshot()
+                , marketDataInput.isRegulatorySnapshot()
+                , marketDataInput.getTagValues());
+        List<TickPriceOutput> result = completableFuture.get(10, TimeUnit.SECONDS);
+        //we get one tick and we stop now
+        client.cancelMktData(reqId);
+        return result;
+    }
+
+    public List<Bar> reqHistoricalData(HistoricalDataInput historicalDataInput) throws ExecutionException, InterruptedException, TimeoutException {
+        RequestTracker<Bar> historicalTracker = requestTrackerManager.getTracker(Bar.class);
+        int reqId = historicalTracker.nextReqId();
+        CompletableFuture<List<Bar>> completableFuture = new CompletableFuture<>();
+        historicalTracker.start(reqId,completableFuture);
+        //        Contract contract = new Contract();
+//        contract.symbol("SMCI");
 //        contract.secType("STK");
 //        contract.exchange("SMART");
-//        contract.currency("USD");.
-//
-        //        // Define an actual contract
-        Contract contract = new Contract();
-        contract.symbol("AAPL");
-        contract.secType("STK");
-        contract.exchange("SMART");
-        contract.currency("USD");
+//        contract.currency("USD");
+        //        client.reqHistoricalData(1, contract,"","2 D", "1 min", "TRADES", 1,1,false,null);
+        client.reqHistoricalData(1, historicalDataInput.getContract()
+                , historicalDataInput.getEndDateTime()
+                , historicalDataInput.getDurationStr()
+                , historicalDataInput.getBarSize().toString()
+                , historicalDataInput.getWhatToShow().toString()
+                , historicalDataInput.getUseRth().ordinal()
+                , historicalDataInput.getFormatData().getValue()
+                , historicalDataInput.isKeepUpToDate()
+                , historicalDataInput.getChartOptions());
 
-        client.reqMktData(1, contract, "", false, false, null);
-    }
-
-    public void reqHistoricalData() {
-        /** 1. int reqID -> unique request identifier to match response to find that request
-         *  2. Contract -> Object describing the instrument
-         *  3. String endDateTime -> "YYYYMMDD HH:MM:SS [TZ]" (TZ optional) or  "" for now
-         *  4. String durationStr -> how far back from endDateTime to fetch. format: number + unit (e.g., "30 D", "1 M", "1 Y", "2 W", "3600 S").
-         *  5. String barSizeSetting -> the bar (e.g. "1 sec, "1 min", "5 mins", "1 month" ,etc)
-         *  6. String whatToShow -> data type to return (e.g "TRADES", "BID", "ASK", "HISTORICAL_VOLATILITY") Use "TRADES" for normal OHLC of trades.
-         *  7. int useRTH -> 1 = return data only for Regular Trading Hours (RTH); 0 = return data for all hours (including pre-/post-market).
-         *  8. int formatData -> controls the date/time format returned in bars (1 - human-readable date/time strings, 2 - epoch-style)
-         *  9. boolean keepUpToDate -> if true, the API attempts to keep the requested bars updated in real time. If false you get a one-shot historical dump.
-         *  10. List<TagValue> chartOptions - optional chart options
-         */
-
-        Contract contract = new Contract();
-        contract.symbol("AAPL");
-        contract.secType("STK");
-        contract.exchange("SMART");
-        contract.currency("USD");
-        client.reqHistoricalData(1, contract,"","1 Y", "1 min", "ASK", 1,1,false,null);
+        return completableFuture.get(10, TimeUnit.SECONDS);
     }
 
 
-    public List<ScanData> marketScan(ScannerSubscription scannerSubscription) throws ExecutionException, InterruptedException, TimeoutException {
+    public List<ScanData> marketScan(ScannerSubscription scannerSubscription, List<TagValue> filterOptions) throws ExecutionException, InterruptedException, TimeoutException {
         // Uncomment to get XML of all valid scanner parameters
         // client.reqScannerParameters();
-
-        int reqId = marketTracker.nextReqId();
-        CompletableFuture<List<ScanData>> completableFuture = new CompletableFuture();
-        marketTracker.start(reqId,completableFuture);
+        RequestTracker<ScanData> scanDataTracker = requestTrackerManager.getTracker(ScanData.class);
+        int reqId = scanDataTracker.nextReqId();
+        CompletableFuture<List<ScanData>> completableFuture = new CompletableFuture<>();
+        scanDataTracker.start(reqId,completableFuture);
 
 //        ScannerSubscription scannerSubscription = new ScannerSubscription();
 //
@@ -191,7 +170,7 @@ public class IBKRConnection {
 //        // scannerSubscription.moodyRatingAbove("Baa"); // Credit rating filters
 //        // scannerSubscription.stockTypeFilter("ALL");  // "CORP" or "ADR" or "ETF"
 
-        client.reqScannerSubscription(reqId, scannerSubscription, new ArrayList<>(), new ArrayList<>());
+        client.reqScannerSubscription(reqId, scannerSubscription, new ArrayList<>(), filterOptions);
         List<ScanData> results = completableFuture.get(10, TimeUnit.SECONDS);
         client.cancelScannerSubscription(reqId);
         return results;

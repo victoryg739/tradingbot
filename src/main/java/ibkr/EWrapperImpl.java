@@ -2,8 +2,12 @@ package ibkr;
 
 import com.ib.client.*;
 import com.ib.client.protobuf.*;
+import com.sun.net.httpserver.Request;
 import data.RequestTracker;
+import data.RequestTrackerManager;
+import ibkr.model.MarketDataInput;
 import ibkr.model.ScanData;
+import ibkr.model.TickPriceOutput;
 
 import java.util.List;
 import java.util.Map;
@@ -23,14 +27,14 @@ public class EWrapperImpl implements EWrapper {
     protected int currentOrderId = -1;
     //! [socket_declare]
 
-    private RequestTracker<ScanData> marketTracker;
+    private RequestTrackerManager requestTrackerManager;
 
 
     //! [socket_init]
-    public EWrapperImpl(RequestTracker<ScanData> marketTracker) {
+    public EWrapperImpl(RequestTrackerManager requestTrackerManager) {
         readerSignal = new EJavaSignal();
         clientSocket = new EClientSocket(this, readerSignal);
-        this.marketTracker = marketTracker;
+        this.requestTrackerManager = requestTrackerManager;
     }
     //! [socket_init]
     public EClientSocket getClient() {
@@ -48,6 +52,16 @@ public class EWrapperImpl implements EWrapper {
     //! [tickprice]
     @Override
     public void tickPrice(int tickerId, int field, double price, TickAttrib attribs) {
+        //market data  -> tick uses this
+        RequestTracker<TickPriceOutput> tickPriceTracker = requestTrackerManager.getTracker(TickPriceOutput.class);
+        TickPriceOutput tickPriceOutput = TickPriceOutput.builder()
+                .field(field)
+                .price(price)
+                .attribs(attribs)
+                .build();
+        tickPriceTracker.add(tickerId,tickPriceOutput);
+        tickPriceTracker.complete(tickerId);
+
         System.out.println("Tick Price: " + EWrapperMsgGenerator.tickPrice( tickerId, field, price, attribs));
     }
     //! [tickprice]
@@ -55,6 +69,7 @@ public class EWrapperImpl implements EWrapper {
     //! [ticksize]
     @Override
     public void tickSize(int tickerId, int field, Decimal size) {
+        //market data  -> tick uses this
         System.out.println("Tick Size: " + EWrapperMsgGenerator.tickSize( tickerId, field, size));
     }
     //! [ticksize]
@@ -214,6 +229,8 @@ public class EWrapperImpl implements EWrapper {
     //! [historicaldata]
     @Override
     public void historicalData(int reqId, Bar bar) {
+        RequestTracker <Bar> historicalTracker = requestTrackerManager.getTracker(Bar.class);
+        historicalTracker.add(reqId, bar);
         System.out.println("HistoricalData:  " + EWrapperMsgGenerator.historicalData(reqId, bar.time(), bar.open(), bar.high(), bar.low(), bar.close(), bar.volume(), bar.count(), bar.wap()));
     }
     //! [historicaldata]
@@ -221,6 +238,8 @@ public class EWrapperImpl implements EWrapper {
     //! [historicaldataend]
     @Override
     public void historicalDataEnd(int reqId, String startDateStr, String endDateStr) {
+        RequestTracker <Bar> historicalTracker = requestTrackerManager.getTracker(Bar.class);
+        historicalTracker.complete(reqId);
         System.out.println("HistoricalDataEnd. " + EWrapperMsgGenerator.historicalDataEnd(reqId, startDateStr, endDateStr));
     }
     //! [historicaldataend]
@@ -243,7 +262,8 @@ public class EWrapperImpl implements EWrapper {
                 .projection(projection)
                 .legsStr(legsStr)
                 .build();
-        marketTracker.add(reqId, scanData);
+        RequestTracker<ScanData> scanDataTracker = requestTrackerManager.getTracker(ScanData.class);
+        scanDataTracker.add(reqId, scanData);
 //        System.out.println("ScannerData: " + EWrapperMsgGenerator.scannerData(reqId, rank, contractDetails, distance, benchmark, projection, legsStr));
     }
     //! [scannerdata]
@@ -251,7 +271,8 @@ public class EWrapperImpl implements EWrapper {
     //! [scannerdataend]
     @Override
     public void scannerDataEnd(int reqId) {
-        marketTracker.complete(reqId);
+        RequestTracker<ScanData> scanDataTracker = requestTrackerManager.getTracker(ScanData.class);
+        scanDataTracker.complete(reqId);
         System.out.println("ScannerDataEnd: " + EWrapperMsgGenerator.scannerDataEnd(reqId));
     }
     //! [scannerdataend]
@@ -481,6 +502,7 @@ public class EWrapperImpl implements EWrapper {
     //! [tickReqParams]
     @Override
     public void tickReqParams(int tickerId, double minTick, String bboExchange, int snapshotPermissions) {
+        //market data  -> tick uses this
         System.out.println("Tick req params: " + EWrapperMsgGenerator.tickReqParams(tickerId, minTick, bboExchange, snapshotPermissions));
     }
     //! [tickReqParams]
