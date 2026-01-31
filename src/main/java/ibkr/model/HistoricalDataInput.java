@@ -42,7 +42,7 @@ public class HistoricalDataInput {
     }
     @Getter
     public enum FormatData{
-        HUMAN_READERABLE(1),
+        HUMAN_READABLE(1),
         EPOCH_STYLE(2);
 
         private final int value;

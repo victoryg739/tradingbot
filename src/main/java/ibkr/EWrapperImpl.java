@@ -2,16 +2,17 @@ package ibkr;
 
 import com.ib.client.*;
 import com.ib.client.protobuf.*;
-import com.sun.net.httpserver.Request;
 import data.RequestTracker;
 import data.RequestTrackerManager;
-import ibkr.model.MarketDataInput;
-import ibkr.model.ScanData;
-import ibkr.model.TickPriceOutput;
+import ibkr.model.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import util.Constants;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /*
 EWrapper - This is the "incoming" side. It's the class that receives responses from TWS.
@@ -19,16 +20,23 @@ when TWS sends back market data, order confirmations, or error messages, EWrappe
 You need to implement (write code for) these methods to handle the responses.
 */
 public class EWrapperImpl implements EWrapper {
-    //! [ewrapperimpl]
+    private static final Logger log = LoggerFactory.getLogger(EWrapperImpl.class);
 
-    //! [socket_declare]fe
     private EReaderSignal readerSignal;
     private EClientSocket clientSocket;
-    protected int currentOrderId = -1;
+//    protected int currentOrderId = -1;
+    // Stored Order ID - no need for constant retriever and its atomic
+    private final AtomicInteger currentOrderId = new AtomicInteger(-1);
     //! [socket_declare]
 
     private RequestTrackerManager requestTrackerManager;
 
+//    private Map<Integer, Set<Integer>> receivedTickTypes = new ConcurrentHashMap<>();
+//    private Set<Integer> requiredTicks = Set.of(
+//            TickType.BID.index(),    // 1
+//            TickType.ASK.index(),    // 2
+//            TickType.LAST.index()    // 4
+//    );
 
     //! [socket_init]
     public EWrapperImpl(RequestTrackerManager requestTrackerManager) {
@@ -45,212 +53,238 @@ public class EWrapperImpl implements EWrapper {
         return readerSignal;
     }
 
-    public int getCurrentOrderId() {
-        return currentOrderId;
+    public synchronized int getAndIncrementOrderId() {
+        return currentOrderId.getAndIncrement();
+    }
+
+    /**
+     * Atomically reserves multiple sequential order IDs.
+     * Used for bracket orders where parent and child orders need sequential IDs.
+     * To prevent the following race condition:
+     *   1. Thread A calls placeBracketOrders()
+     *     - Gets parentOrderId = 1000 (currentOrderId becomes 1001)
+     *     - childOrderId1 = 1001
+     *     - childOrderId2 = 1002
+     *   2. But BEFORE thread A places the orders, Thread B also calls placeBracketOrders()
+     *     - Gets parentOrderId = 1001 (currentOrderId becomes 1002)
+     *     - childOrderId1 = 1002
+     *     - childOrderId2 = 1003
+     *   3. Now there's a conflict:
+     *     - Thread A expects to use 1000, 1001, 1002
+     *     - Thread B expects to use 1001, 1002, 1003
+     *     - IDs 1001 and 1002 are duplicated!
+     * @param count Number of IDs to reserve
+     * @return The first ID in the sequence
+     */
+    public synchronized int reserveOrderIds(int count) {
+        int firstId = currentOrderId.get();
+        currentOrderId.addAndGet(count);
+        return firstId;
+    }
+
+    public synchronized void waitForInitOrderId() throws InterruptedException {
+        while (currentOrderId.get() == -1) {
+            wait(5000);
+            /**
+             * What wait() do?
+             * 1. Release the lock on this object -> the whole method (acquired by sychronized)
+             * 2. Current thread pauses execution and waits
+             * 3. Can be woken up by notify()/notifyAll() or timeout of 5 seconds
+             * */
+        }
     }
 
     //! [tickprice]
     @Override
     public void tickPrice(int tickerId, int field, double price, TickAttrib attribs) {
         //market data  -> tick uses this
+        //only work when snapshot == True now
+
         RequestTracker<TickPriceOutput> tickPriceTracker = requestTrackerManager.getTracker(TickPriceOutput.class);
+
         TickPriceOutput tickPriceOutput = TickPriceOutput.builder()
                 .field(field)
                 .price(price)
                 .attribs(attribs)
                 .build();
-        tickPriceTracker.add(tickerId,tickPriceOutput);
-        tickPriceTracker.complete(tickerId);
 
-        System.out.println("Tick Price: " + EWrapperMsgGenerator.tickPrice( tickerId, field, price, attribs));
+        tickPriceTracker.add(tickerId,tickPriceOutput);
+
+//        System.out.println("Tick Price: " + EWrapperMsgGenerator.tickPrice( tickerId, field, price, attribs));
     }
     //! [tickprice]
 
-    //! [ticksize]
     @Override
     public void tickSize(int tickerId, int field, Decimal size) {
-        //market data  -> tick uses this
-        System.out.println("Tick Size: " + EWrapperMsgGenerator.tickSize( tickerId, field, size));
+        log.trace("Tick Size: tickerId={}, field={}, size={}", tickerId, field, size);
     }
-    //! [ticksize]
 
-    //! [tickoptioncomputation]
     @Override
     public void tickOptionComputation(int tickerId, int field, int tickAttrib, double impliedVol, double delta, double optPrice,
                                       double pvDividend, double gamma, double vega, double theta, double undPrice) {
-        System.out.println("TickOptionComputation: " + EWrapperMsgGenerator.tickOptionComputation( tickerId, field, tickAttrib, impliedVol, delta, optPrice, pvDividend, gamma, vega, theta, undPrice));
+        log.trace("TickOptionComputation: tickerId={}, field={}, delta={}, optPrice={}", tickerId, field, delta, optPrice);
     }
-    //! [tickoptioncomputation]
 
-    //! [tickgeneric]
     @Override
     public void tickGeneric(int tickerId, int tickType, double value) {
-        System.out.println("Tick Generic: " + EWrapperMsgGenerator.tickGeneric(tickerId, tickType, value));
+        log.trace("Tick Generic: tickerId={}, tickType={}, value={}", tickerId, tickType, value);
     }
-    //! [tickgeneric]
 
-    //! [tickstring]
     @Override
     public void tickString(int tickerId, int tickType, String value) {
-        System.out.println("Tick String: " + EWrapperMsgGenerator.tickString(tickerId, tickType, value));
+        log.trace("Tick String: tickerId={}, tickType={}, value={}", tickerId, tickType, value);
     }
-    //! [tickstring]
+
     @Override
     public void tickEFP(int tickerId, int tickType, double basisPoints, String formattedBasisPoints, double impliedFuture, int holdDays,
                         String futureLastTradeDate, double dividendImpact, double dividendsToLastTradeDate) {
-        System.out.println("TickEFP: " + EWrapperMsgGenerator.tickEFP(tickerId, tickType, basisPoints, formattedBasisPoints,
-                impliedFuture, holdDays, futureLastTradeDate, dividendImpact, dividendsToLastTradeDate));
+        log.trace("TickEFP: tickerId={}, tickType={}, basisPoints={}", tickerId, tickType, basisPoints);
     }
-    //! [orderstatus]
+    private static final Logger orderLog = LoggerFactory.getLogger("ORDER_AUDIT");
+
     @Override
     public void orderStatus(int orderId, String status, Decimal filled, Decimal remaining, double avgFillPrice, long permId, int parentId,
                             double lastFillPrice, int clientId, String whyHeld, double mktCapPrice) {
-        System.out.println(EWrapperMsgGenerator.orderStatus( orderId, status, filled, remaining, avgFillPrice, permId, parentId, lastFillPrice, clientId, whyHeld, mktCapPrice));
+        // Log to both regular log and order audit log
+        orderLog.info("ORDER_STATUS | orderId={} | status={} | filled={} | remaining={} | avgFillPrice={} | lastFillPrice={} | parentId={} | whyHeld={}",
+                orderId, status, filled, remaining, avgFillPrice, lastFillPrice, parentId, whyHeld);
+
+//        // Debug level for regular logs
+//        log.debug("Order status update: orderId={}, status={}, filled={}, remaining={}",
+//                orderId, status, filled, remaining);
     }
-    //! [orderstatus]
 
     //! [openorder]
     @Override
     public void openOrder(int orderId, Contract contract, Order order, OrderState orderState) {
-        System.out.println(EWrapperMsgGenerator.openOrder(orderId, contract, order, orderState));
+        RequestTracker<OrderOutput> orderOutputTracker = requestTrackerManager.getTracker(OrderOutput.class);
+        OrderOutput orderOutput = OrderOutput.builder()
+                .orderId(orderId)
+                .contract(contract)
+                .order(order)
+                .orderState(orderState)
+                .build();
+
+        orderOutputTracker.add(Constants.OPEN_ORDERS_REQ_ID, orderOutput);
+
+//        System.out.println(EWrapperMsgGenerator.openOrder(orderId, contract, order, orderState));
     }
     //! [openorder]
 
     //! [openorderend]
     @Override
     public void openOrderEnd() {
-        System.out.println("Open Order End: " + EWrapperMsgGenerator.openOrderEnd());
+        RequestTracker<OrderOutput> orderOutputTracker = requestTrackerManager.getTracker(OrderOutput.class);
+        orderOutputTracker.complete(Constants.OPEN_ORDERS_REQ_ID);
+//        System.out.println("Open Order End: " + EWrapperMsgGenerator.openOrderEnd());
     }
     //! [openorderend]
 
-    //! [updateaccountvalue]
     @Override
     public void updateAccountValue(String key, String value, String currency, String accountName) {
-        System.out.println(EWrapperMsgGenerator.updateAccountValue( key, value, currency, accountName));
+        log.debug("Account value update: key={}, value={}, currency={}, account={}", key, value, currency, accountName);
     }
-    //! [updateaccountvalue]
 
-    //! [updateportfolio]
     @Override
     public void updatePortfolio(Contract contract, Decimal position, double marketPrice, double marketValue, double averageCost,
                                 double unrealizedPNL, double realizedPNL, String accountName) {
-        System.out.println(EWrapperMsgGenerator.updatePortfolio( contract, position, marketPrice, marketValue, averageCost, unrealizedPNL, realizedPNL, accountName));
+        log.debug("Portfolio update: symbol={}, position={}, marketValue={}, unrealizedPNL={}",
+                contract.symbol(), position, marketValue, unrealizedPNL);
     }
-    //! [updateportfolio]
 
-    //! [updateaccounttime]
     @Override
     public void updateAccountTime(String timeStamp) {
-        System.out.println(EWrapperMsgGenerator.updateAccountTime( timeStamp));
+        log.trace("Account time update: {}", timeStamp);
     }
-    //! [updateaccounttime]
 
-    //! [accountdownloadend]
     @Override
     public void accountDownloadEnd(String accountName) {
-        System.out.println(EWrapperMsgGenerator.accountDownloadEnd(accountName));
+        log.debug("Account download complete: {}", accountName);
     }
-    //! [accountdownloadend]
 
-    //! [nextvalidid]
     @Override
-    public void nextValidId(int orderId) {
-        System.out.println(EWrapperMsgGenerator.nextValidId(orderId));
-        currentOrderId = orderId;
+    public synchronized void nextValidId(int orderId) {
+        log.info("Received next valid order ID from TWS: {}", orderId);
+        currentOrderId.set(orderId);
+        notifyAll();  // Wake up threads waiting in waitForInitOrderId()
     }
-    //! [nextvalidid]
 
     //! [contractdetails]
     @Override
     public void contractDetails(int reqId, ContractDetails contractDetails) {
-        System.out.println(EWrapperMsgGenerator.contractDetails(reqId, contractDetails));
+        RequestTracker<ContractDetails> contractDetailsTracker = requestTrackerManager.getTracker(ContractDetails.class);
+        contractDetailsTracker.add(reqId, contractDetails);
+//        System.out.println(EWrapperMsgGenerator.contractDetails(reqId, contractDetails));
     }
     //! [contractdetails]
     @Override
     public void bondContractDetails(int reqId, ContractDetails contractDetails) {
-        System.out.println(EWrapperMsgGenerator.bondContractDetails(reqId, contractDetails));
+        log.debug("Bond contract details: reqId={}, symbol={}", reqId, contractDetails.contract().symbol());
     }
     //! [contractdetailsend]
     @Override
     public void contractDetailsEnd(int reqId) {
-        System.out.println("Contract Details End: " + EWrapperMsgGenerator.contractDetailsEnd(reqId));
+        RequestTracker<ContractDetails> contractDetailsTracker = requestTrackerManager.getTracker(ContractDetails.class);
+        contractDetailsTracker.complete(reqId);
+//        System.out.println("Contract Details End: " + EWrapperMsgGenerator.contractDetailsEnd(reqId));
     }
     //! [contractdetailsend]
 
-    //! [execdetails]
     @Override
     public void execDetails(int reqId, Contract contract, Execution execution) {
-        System.out.println(EWrapperMsgGenerator.execDetails( reqId, contract, execution));
+        orderLog.info("EXEC_DETAILS | reqId={} | symbol={} | side={} | shares={} | price={} | execId={}",
+                reqId, contract.symbol(), execution.side(), execution.shares(), execution.price(), execution.execId());
     }
-    //! [execdetails]
 
-    //! [execdetailsend]
     @Override
     public void execDetailsEnd(int reqId) {
-        System.out.println("Exec Details End: " + EWrapperMsgGenerator.execDetailsEnd( reqId));
+        log.debug("Execution details end: reqId={}", reqId);
     }
-    //! [execdetailsend]
 
-    //! [updatemktdepth]
     @Override
     public void updateMktDepth(int tickerId, int position, int operation, int side, double price, Decimal size) {
-        System.out.println(EWrapperMsgGenerator.updateMktDepth(tickerId, position, operation, side, price, size));
+        log.trace("Market depth: tickerId={}, position={}, side={}, price={}, size={}", tickerId, position, side, price, size);
     }
-    //! [updatemktdepth]
 
-    //! [updatemktdepthl2]
     @Override
     public void updateMktDepthL2(int tickerId, int position, String marketMaker, int operation, int side, double price, Decimal size, boolean isSmartDepth) {
-        System.out.println(EWrapperMsgGenerator.updateMktDepthL2( tickerId, position, marketMaker, operation, side, price, size, isSmartDepth));
+        log.trace("Market depth L2: tickerId={}, marketMaker={}, price={}, size={}", tickerId, marketMaker, price, size);
     }
-    //! [updatemktdepthl2]
 
-    //! [updatenewsbulletin]
     @Override
     public void updateNewsBulletin(int msgId, int msgType, String message, String origExchange) {
-        System.out.println("News Bulletin: " + EWrapperMsgGenerator.updateNewsBulletin( msgId, msgType, message, origExchange));
+        log.info("News Bulletin: msgId={}, type={}, message={}", msgId, msgType, message);
     }
-    //! [updatenewsbulletin]
 
-    //! [managedaccounts]
     @Override
     public void managedAccounts(String accountsList) {
-        System.out.println("Account list: " + accountsList);
+        log.info("Managed accounts: {}", accountsList);
     }
-    //! [managedaccounts]
 
-    //! [receivefa]
     @Override
     public void receiveFA(int faDataType, String xml) {
-        System.out.println("Receiving FA: " + faDataType + " - " + xml);
+        log.debug("Receiving FA: type={}, xmlLength={}", faDataType, xml != null ? xml.length() : 0);
     }
-    //! [receivefa]
 
-    //! [historicaldata]
     @Override
     public void historicalData(int reqId, Bar bar) {
-        RequestTracker <Bar> historicalTracker = requestTrackerManager.getTracker(Bar.class);
+        RequestTracker<Bar> historicalTracker = requestTrackerManager.getTracker(Bar.class);
         historicalTracker.add(reqId, bar);
-        System.out.println("HistoricalData:  " + EWrapperMsgGenerator.historicalData(reqId, bar.time(), bar.open(), bar.high(), bar.low(), bar.close(), bar.volume(), bar.count(), bar.wap()));
+        log.trace("HistoricalData reqId={}: time={}, O={}, H={}, L={}, C={}, V={}",
+                reqId, bar.time(), bar.open(), bar.high(), bar.low(), bar.close(), bar.volume());
     }
-    //! [historicaldata]
 
-    //! [historicaldataend]
     @Override
     public void historicalDataEnd(int reqId, String startDateStr, String endDateStr) {
-        RequestTracker <Bar> historicalTracker = requestTrackerManager.getTracker(Bar.class);
+        RequestTracker<Bar> historicalTracker = requestTrackerManager.getTracker(Bar.class);
         historicalTracker.complete(reqId);
-        System.out.println("HistoricalDataEnd. " + EWrapperMsgGenerator.historicalDataEnd(reqId, startDateStr, endDateStr));
+        log.debug("HistoricalData complete: reqId={}, range={} to {}", reqId, startDateStr, endDateStr);
     }
-    //! [historicaldataend]
 
-
-    //! [scannerparameters]
     @Override
     public void scannerParameters(String xml) {
-        System.out.println("ScannerParameters. " + xml + "\n");
+        log.debug("Scanner parameters received (length={})", xml.length());
     }
-    //! [scannerparameters]
 
     //! [scannerdata]
     @Override
@@ -268,443 +302,389 @@ public class EWrapperImpl implements EWrapper {
     }
     //! [scannerdata]
 
-    //! [scannerdataend]
     @Override
     public void scannerDataEnd(int reqId) {
         RequestTracker<ScanData> scanDataTracker = requestTrackerManager.getTracker(ScanData.class);
         scanDataTracker.complete(reqId);
-        System.out.println("ScannerDataEnd: " + EWrapperMsgGenerator.scannerDataEnd(reqId));
+        log.debug("Scanner data complete: reqId={}", reqId);
     }
-    //! [scannerdataend]
 
-    //! [realtimebar]
     @Override
     public void realtimeBar(int reqId, long time, double open, double high, double low, double close, Decimal volume, Decimal wap, int count) {
-        System.out.println("RealTimeBar: " + EWrapperMsgGenerator.realtimeBar(reqId, time, open, high, low, close, volume, wap, count));
+        log.trace("RealTimeBar: reqId={}, O={}, H={}, L={}, C={}, V={}", reqId, open, high, low, close, volume);
     }
-    //! [realtimebar]
+
     @Override
     public void currentTime(long time) {
-        System.out.println(EWrapperMsgGenerator.currentTime(time));
+        log.debug("Server time: {}", time);
     }
-    //! [fundamentaldata]
+
     @Override
     public void fundamentalData(int reqId, String data) {
-        System.out.println("FundamentalData: " + EWrapperMsgGenerator.fundamentalData(reqId, data));
+        log.debug("Fundamental data: reqId={}, dataLength={}", reqId, data != null ? data.length() : 0);
     }
-    //! [fundamentaldata]
+
     @Override
     public void deltaNeutralValidation(int reqId, DeltaNeutralContract deltaNeutralContract) {
-        System.out.println("Delta Neutral Validation: " + EWrapperMsgGenerator.deltaNeutralValidation(reqId, deltaNeutralContract));
+        log.debug("Delta Neutral Validation: reqId={}", reqId);
     }
     //! [ticksnapshotend]
     @Override
     public void tickSnapshotEnd(int reqId) {
-        System.out.println("TickSnapshotEnd: " + EWrapperMsgGenerator.tickSnapshotEnd(reqId));
+        RequestTracker<TickPriceOutput> tickPriceTracker = requestTrackerManager.getTracker(TickPriceOutput.class);
+
+        tickPriceTracker.complete(reqId);
+
+//        System.out.println("TickSnapshotEnd: " + EWrapperMsgGenerator.tickSnapshotEnd(reqId));
     }
     //! [ticksnapshotend]
 
-    //! [marketdatatype]
     @Override
     public void marketDataType(int reqId, int marketDataType) {
-        System.out.println("MarketDataType: " + EWrapperMsgGenerator.marketDataType(reqId, marketDataType));
+        log.debug("Market data type: reqId={}, type={}", reqId, marketDataType);
     }
-    //! [marketdatatype]
 
-    //! [commissionandfeesreport]
     @Override
     public void commissionAndFeesReport(CommissionAndFeesReport commissionAndFeesReport) {
-        System.out.println(EWrapperMsgGenerator.commissionAndFeesReport(commissionAndFeesReport));
+        orderLog.info("COMMISSION | {}", EWrapperMsgGenerator.commissionAndFeesReport(commissionAndFeesReport));
     }
-    //! [commissionandfeesreport]
 
     //! [position]
     @Override
     public void position(String account, Contract contract, Decimal pos, double avgCost) {
-        System.out.println(EWrapperMsgGenerator.position(account, contract, pos, avgCost));
+        RequestTracker<PositionOutput> positionTracker = requestTrackerManager.getTracker(PositionOutput.class);
+        PositionOutput positionOutput = PositionOutput.builder()
+                .account(account)
+                .contract(contract)
+                .pos(pos)
+                .avgCost(avgCost)
+                .build();
+        positionTracker.add(Constants.POSITIONS_REQ_ID, positionOutput);
+//        System.out.println(EWrapperMsgGenerator.position(account, contract, pos, avgCost));
     }
     //! [position]
 
     //! [positionend]
     @Override
     public void positionEnd() {
-        System.out.println("Position End: " + EWrapperMsgGenerator.positionEnd());
+        RequestTracker<PositionOutput> positionTracker = requestTrackerManager.getTracker(PositionOutput.class);
+        positionTracker.complete(Constants.POSITIONS_REQ_ID);
+//        System.out.println("Position End: " + EWrapperMsgGenerator.positionEnd());
     }
     //! [positionend]
 
     //! [accountsummary]
     @Override
     public void accountSummary(int reqId, String account, String tag, String value, String currency) {
-        System.out.println(EWrapperMsgGenerator.accountSummary(reqId, account, tag, value, currency));
+        RequestTracker<AccountSummaryOutput> accountSummaryTracker = requestTrackerManager.getTracker(AccountSummaryOutput.class);
+        AccountSummaryOutput accountSummaryOutput = AccountSummaryOutput.builder()
+                .account(account)
+                .tag(tag)
+                .value(value)
+                .currency(currency)
+                .build();
+        accountSummaryTracker.add(reqId, accountSummaryOutput);
+
+//        System.out.println(EWrapperMsgGenerator.accountSummary(reqId, account, tag, value, currency));
     }
     //! [accountsummary]
 
     //! [accountsummaryend]
     @Override
     public void accountSummaryEnd(int reqId) {
-        System.out.println("Account Summary End. Req Id: " + EWrapperMsgGenerator.accountSummaryEnd(reqId));
+        RequestTracker<AccountSummaryOutput> accountSummaryTracker = requestTrackerManager.getTracker(AccountSummaryOutput.class);
+        accountSummaryTracker.complete(reqId);
+
+//        System.out.println("Account Summary End. Req Id: " + EWrapperMsgGenerator.accountSummaryEnd(reqId));
     }
     //! [accountsummaryend]
     @Override
     public void verifyMessageAPI(String apiData) {
-        System.out.println("verifyMessageAPI");
+        log.debug("verifyMessageAPI: {}", apiData);
     }
 
     @Override
     public void verifyCompleted(boolean isSuccessful, String errorText) {
-        System.out.println("verifyCompleted");
+        if (isSuccessful) {
+            log.info("Verification completed successfully");
+        } else {
+            log.error("Verification failed: {}", errorText);
+        }
     }
 
     @Override
     public void verifyAndAuthMessageAPI(String apiData, String xyzChallenge) {
-        System.out.println("verifyAndAuthMessageAPI");
+        log.debug("verifyAndAuthMessageAPI");
     }
 
     @Override
     public void verifyAndAuthCompleted(boolean isSuccessful, String errorText) {
-        System.out.println("verifyAndAuthCompleted");
+        if (isSuccessful) {
+            log.info("Verification and auth completed successfully");
+        } else {
+            log.error("Verification and auth failed: {}", errorText);
+        }
     }
-    //! [displaygrouplist]
+
     @Override
     public void displayGroupList(int reqId, String groups) {
-        System.out.println("Display Group List. ReqId: " + reqId + ", Groups: " + groups + "\n");
+        log.debug("Display Group List: reqId={}, groups={}", reqId, groups);
     }
-    //! [displaygrouplist]
 
-    //! [displaygroupupdated]
     @Override
     public void displayGroupUpdated(int reqId, String contractInfo) {
-        System.out.println("Display Group Updated. ReqId: " + reqId + ", Contract info: " + contractInfo + "\n");
+        log.debug("Display Group Updated: reqId={}, contractInfo={}", reqId, contractInfo);
     }
-    //! [displaygroupupdated]
     @Override
     public void error(Exception e) {
-        System.out.println("Exception: " + e.getMessage());
+        log.error("TWS Exception: {}", e.getMessage(), e);
     }
 
     @Override
     public void error(String str) {
-        System.out.println("Error: " + str);
+        log.error("TWS Error: {}", str);
     }
-    //! [error]
+
     @Override
     public void error(int id, long errorTime, int errorCode, String errorMsg, String advancedOrderRejectJson) {
-        String errorTimeStr = errorTime != 0 ? ", Time: " + Util.UnixMillisecondsToString(errorTime, "yyyyMMdd-HH:mm:ss") : "";
-        String str = "Error. Id: " + id + errorTimeStr + ", Code: " + errorCode + ", Msg: " + errorMsg;
-        if (advancedOrderRejectJson != null) {
-            str += (", AdvancedOrderRejectJson: " + advancedOrderRejectJson);
+        String errorTimeStr = errorTime != 0 ? Util.UnixMillisecondsToString(errorTime, "yyyyMMdd-HH:mm:ss") : "";
+
+        // Categorize errors by code ranges for appropriate log levels
+        // 2100-2169: Warnings (connectivity, market data farm connections)
+        // 10000+: System messages (often informational)
+        if (errorCode >= 2100 && errorCode < 2170) {
+            log.warn("TWS Warning - id={}, code={}, msg={}, time={}", id, errorCode, errorMsg, errorTimeStr);
+        } else if (errorCode >= 10000) {
+            log.info("TWS Info - id={}, code={}, msg={}", id, errorCode, errorMsg);
+        } else {
+            // Real errors (order rejects, connection issues, etc.)
+            if (advancedOrderRejectJson != null) {
+                log.error("TWS Error - id={}, code={}, msg={}, time={}, orderReject={}",
+                        id, errorCode, errorMsg, errorTimeStr, advancedOrderRejectJson);
+            } else {
+                log.error("TWS Error - id={}, code={}, msg={}, time={}", id, errorCode, errorMsg, errorTimeStr);
+            }
         }
-        System.out.println(str + "\n");
-        //Todo: any a logging system here
     }
 
-    //! [error]
     @Override
     public void connectionClosed() {
-        System.out.println("Connection closed");
+        log.warn("TWS connection closed");
     }
 
-    //! [connectack]
     @Override
     public void connectAck() {
         if (clientSocket.isAsyncEConnect()) {
-            System.out.println("Acknowledging connection");
+            log.info("Acknowledging async TWS connection");
             clientSocket.startAPI();
         }
     }
     //! [connectack]
 
-    //! [positionmulti]
     @Override
     public void positionMulti(int reqId, String account, String modelCode, Contract contract, Decimal pos, double avgCost) {
-        System.out.println(EWrapperMsgGenerator.positionMulti(reqId, account, modelCode, contract, pos, avgCost));
+        log.debug("Position Multi: reqId={}, account={}, symbol={}, pos={}", reqId, account, contract.symbol(), pos);
     }
-    //! [positionmulti]
 
-    //! [positionmultiend]
     @Override
     public void positionMultiEnd(int reqId) {
-        System.out.println("Position Multi End: " + EWrapperMsgGenerator.positionMultiEnd(reqId));
+        log.debug("Position Multi End: reqId={}", reqId);
     }
-    //! [positionmultiend]
 
-    //! [accountupdatemulti]
     @Override
     public void accountUpdateMulti(int reqId, String account, String modelCode, String key, String value, String currency) {
-        System.out.println("Account Update Multi: " + EWrapperMsgGenerator.accountUpdateMulti(reqId, account, modelCode, key, value, currency));
+        log.debug("Account Update Multi: reqId={}, key={}, value={}", reqId, key, value);
     }
-    //! [accountupdatemulti]
 
-    //! [accountupdatemultiend]
     @Override
     public void accountUpdateMultiEnd(int reqId) {
-        System.out.println("Account Update Multi End: " + EWrapperMsgGenerator.accountUpdateMultiEnd(reqId));
+        log.debug("Account Update Multi End: reqId={}", reqId);
     }
-    //! [accountupdatemultiend]
 
-    //! [securityDefinitionOptionParameter]
     @Override
     public void securityDefinitionOptionalParameter(int reqId, String exchange, int underlyingConId, String tradingClass, String multiplier,
                                                     Set<String> expirations, Set<Double> strikes) {
-        System.out.println("Security Definition Optional Parameter: " + EWrapperMsgGenerator.securityDefinitionOptionalParameter(reqId, exchange, underlyingConId, tradingClass, multiplier, expirations, strikes));
+        log.debug("Security Definition Optional Parameter: reqId={}, exchange={}, tradingClass={}", reqId, exchange, tradingClass);
     }
-    //! [securityDefinitionOptionParameter]
 
-    //! [securityDefinitionOptionParameterEnd]
     @Override
     public void securityDefinitionOptionalParameterEnd(int reqId) {
-        System.out.println("Security Definition Optional Parameter End. Request Id: " + reqId);
+        log.debug("Security Definition Optional Parameter End: reqId={}", reqId);
     }
-    //! [securityDefinitionOptionParameterEnd]
 
-    //! [softDollarTiers]
     @Override
     public void softDollarTiers(int reqId, SoftDollarTier[] tiers) {
-        System.out.print(EWrapperMsgGenerator.softDollarTiers(tiers));
+        log.debug("Soft Dollar Tiers: reqId={}, tiersCount={}", reqId, tiers != null ? tiers.length : 0);
     }
-    //! [softDollarTiers]
 
-    //! [familyCodes]
     @Override
     public void familyCodes(FamilyCode[] familyCodes) {
-        System.out.print(EWrapperMsgGenerator.familyCodes(familyCodes));
+        log.debug("Family Codes received: count={}", familyCodes != null ? familyCodes.length : 0);
     }
-    //! [familyCodes]
 
-    //! [symbolSamples]
     @Override
     public void symbolSamples(int reqId, ContractDescription[] contractDescriptions) {
-        System.out.println(EWrapperMsgGenerator.symbolSamples(reqId, contractDescriptions));
+        log.debug("Symbol Samples: reqId={}, count={}", reqId, contractDescriptions != null ? contractDescriptions.length : 0);
     }
-    //! [symbolSamples]
 
-    //! [mktDepthExchanges]
     @Override
     public void mktDepthExchanges(DepthMktDataDescription[] depthMktDataDescriptions) {
-        System.out.println(EWrapperMsgGenerator.mktDepthExchanges(depthMktDataDescriptions));
+        log.debug("Market Depth Exchanges: count={}", depthMktDataDescriptions != null ? depthMktDataDescriptions.length : 0);
     }
-    //! [mktDepthExchanges]
 
-    //! [tickNews]
     @Override
     public void tickNews(int tickerId, long timeStamp, String providerCode, String articleId, String headline, String extraData) {
-        System.out.println(EWrapperMsgGenerator.tickNews(tickerId, timeStamp, providerCode, articleId, headline, extraData));
+        log.info("Tick News: tickerId={}, provider={}, headline={}", tickerId, providerCode, headline);
     }
-    //! [tickNews]
 
-    //! [smartcomponents]
     @Override
     public void smartComponents(int reqId, Map<Integer, Map.Entry<String, Character>> theMap) {
-        System.out.println(EWrapperMsgGenerator.smartComponents(reqId, theMap));
+        log.debug("Smart Components: reqId={}, size={}", reqId, theMap != null ? theMap.size() : 0);
     }
-    //! [smartcomponents]
 
-    //! [tickReqParams]
     @Override
     public void tickReqParams(int tickerId, double minTick, String bboExchange, int snapshotPermissions) {
-        //market data  -> tick uses this
-        System.out.println("Tick req params: " + EWrapperMsgGenerator.tickReqParams(tickerId, minTick, bboExchange, snapshotPermissions));
+        log.trace("Tick Req Params: tickerId={}, minTick={}, bboExchange={}", tickerId, minTick, bboExchange);
     }
-    //! [tickReqParams]
 
-    //! [newsProviders]
     @Override
     public void newsProviders(NewsProvider[] newsProviders) {
-        System.out.print(EWrapperMsgGenerator.newsProviders(newsProviders));
+        log.debug("News Providers: count={}", newsProviders != null ? newsProviders.length : 0);
     }
-    //! [newsProviders]
 
-    //! [newsArticle]
     @Override
     public void newsArticle(int requestId, int articleType, String articleText) {
-        System.out.println(EWrapperMsgGenerator.newsArticle(requestId, articleType, articleText));
+        log.debug("News Article: requestId={}, type={}, textLength={}", requestId, articleType, articleText != null ? articleText.length() : 0);
     }
-    //! [newsArticle]
 
-    //! [historicalNews]
     @Override
     public void historicalNews(int requestId, String time, String providerCode, String articleId, String headline) {
-        System.out.println(EWrapperMsgGenerator.historicalNews(requestId, time, providerCode, articleId, headline));
+        log.debug("Historical News: requestId={}, provider={}, headline={}", requestId, providerCode, headline);
     }
-    //! [historicalNews]
 
-    //! [historicalNewsEnd]
     @Override
     public void historicalNewsEnd(int requestId, boolean hasMore) {
-        System.out.println(EWrapperMsgGenerator.historicalNewsEnd(requestId, hasMore));
+        log.debug("Historical News End: requestId={}, hasMore={}", requestId, hasMore);
     }
-    //! [historicalNewsEnd]
 
-    //! [headTimestamp]
     @Override
     public void headTimestamp(int reqId, String headTimestamp) {
-        System.out.println(EWrapperMsgGenerator.headTimestamp(reqId, headTimestamp));
+        log.debug("Head Timestamp: reqId={}, timestamp={}", reqId, headTimestamp);
     }
-    //! [headTimestamp]
 
-    //! [histogramData]
     @Override
     public void histogramData(int reqId, List<HistogramEntry> items) {
-        System.out.println(EWrapperMsgGenerator.histogramData(reqId, items));
+        log.debug("Histogram Data: reqId={}, itemsCount={}", reqId, items != null ? items.size() : 0);
     }
-    //! [histogramData]
 
-    //! [historicalDataUpdate]
     @Override
     public void historicalDataUpdate(int reqId, Bar bar) {
-        System.out.println("HistoricalDataUpdate. " + EWrapperMsgGenerator.historicalData(reqId, bar.time(), bar.open(), bar.high(), bar.low(), bar.close(), bar.volume(), bar.count(), bar.wap()));
+        log.trace("Historical Data Update: reqId={}, time={}, C={}", reqId, bar.time(), bar.close());
     }
-    //! [historicalDataUpdate]
 
-    //! [rerouteMktDataReq]
     @Override
     public void rerouteMktDataReq(int reqId, int conId, String exchange) {
-        System.out.println(EWrapperMsgGenerator.rerouteMktDataReq(reqId, conId, exchange));
+        log.debug("Reroute Market Data: reqId={}, conId={}, exchange={}", reqId, conId, exchange);
     }
-    //! [rerouteMktDataReq]
 
-    //! [rerouteMktDepthReq]
     @Override
     public void rerouteMktDepthReq(int reqId, int conId, String exchange) {
-        System.out.println(EWrapperMsgGenerator.rerouteMktDepthReq(reqId, conId, exchange));
+        log.debug("Reroute Market Depth: reqId={}, conId={}, exchange={}", reqId, conId, exchange);
     }
-    //! [rerouteMktDepthReq]
 
-    //! [marketRule]
     @Override
     public void marketRule(int marketRuleId, PriceIncrement[] priceIncrements) {
-        System.out.println(EWrapperMsgGenerator.marketRule(marketRuleId, priceIncrements));
+        log.debug("Market Rule: marketRuleId={}, incrementsCount={}", marketRuleId, priceIncrements != null ? priceIncrements.length : 0);
     }
-    //! [marketRule]
 
-    //! [pnl]
     @Override
     public void pnl(int reqId, double dailyPnL, double unrealizedPnL, double realizedPnL) {
-        System.out.println(EWrapperMsgGenerator.pnl(reqId, dailyPnL, unrealizedPnL, realizedPnL));
+        log.info("PnL: reqId={}, daily={}, unrealized={}, realized={}", reqId, dailyPnL, unrealizedPnL, realizedPnL);
     }
-    //! [pnl]
 
-    //! [pnlsingle]
     @Override
     public void pnlSingle(int reqId, Decimal pos, double dailyPnL, double unrealizedPnL, double realizedPnL, double value) {
-        System.out.println(EWrapperMsgGenerator.pnlSingle(reqId, pos, dailyPnL, unrealizedPnL, realizedPnL, value));
+        log.info("PnL Single: reqId={}, pos={}, daily={}, unrealized={}, realized={}", reqId, pos, dailyPnL, unrealizedPnL, realizedPnL);
     }
-    //! [pnlsingle]
 
-    //! [historicalticks]
     @Override
     public void historicalTicks(int reqId, List<HistoricalTick> ticks, boolean done) {
-        for (HistoricalTick tick : ticks) {
-            System.out.println(EWrapperMsgGenerator.historicalTick(reqId, tick.time(), tick.price(), tick.size()));
-        }
+        log.trace("Historical Ticks: reqId={}, count={}, done={}", reqId, ticks.size(), done);
     }
-    //! [historicalticks]
 
-    //! [historicalticksbidask]
     @Override
     public void historicalTicksBidAsk(int reqId, List<HistoricalTickBidAsk> ticks, boolean done) {
-        for (HistoricalTickBidAsk tick : ticks) {
-            System.out.println(EWrapperMsgGenerator.historicalTickBidAsk(reqId, tick.time(), tick.tickAttribBidAsk(), tick.priceBid(), tick.priceAsk(), tick.sizeBid(),
-                    tick.sizeAsk()));
-        }
+        log.trace("Historical Ticks Bid/Ask: reqId={}, count={}, done={}", reqId, ticks.size(), done);
     }
-    //! [historicalticksbidask]
 
     @Override
-    //! [historicaltickslast]
     public void historicalTicksLast(int reqId, List<HistoricalTickLast> ticks, boolean done) {
-        for (HistoricalTickLast tick : ticks) {
-            System.out.println(EWrapperMsgGenerator.historicalTickLast(reqId, tick.time(), tick.tickAttribLast(), tick.price(), tick.size(), tick.exchange(),
-                    tick.specialConditions()));
-        }
+        log.trace("Historical Ticks Last: reqId={}, count={}, done={}", reqId, ticks.size(), done);
     }
-    //! [historicaltickslast]
 
-    //! [tickbytickalllast]
     @Override
     public void tickByTickAllLast(int reqId, int tickType, long time, double price, Decimal size, TickAttribLast tickAttribLast,
                                   String exchange, String specialConditions) {
-        System.out.println(EWrapperMsgGenerator.tickByTickAllLast(reqId, tickType, time, price, size, tickAttribLast, exchange, specialConditions));
+        log.trace("Tick-by-Tick Last: reqId={}, price={}, size={}, exchange={}", reqId, price, size, exchange);
     }
-    //! [tickbytickalllast]
 
-    //! [tickbytickbidask]
     @Override
     public void tickByTickBidAsk(int reqId, long time, double bidPrice, double askPrice, Decimal bidSize, Decimal askSize,
                                  TickAttribBidAsk tickAttribBidAsk) {
-        System.out.println(EWrapperMsgGenerator.tickByTickBidAsk(reqId, time, bidPrice, askPrice, bidSize, askSize, tickAttribBidAsk));
+        log.trace("Tick-by-Tick Bid/Ask: reqId={}, bid={}, ask={}", reqId, bidPrice, askPrice);
     }
-    //! [tickbytickbidask]
 
-    //! [tickbytickmidpoint]
     @Override
     public void tickByTickMidPoint(int reqId, long time, double midPoint) {
-        System.out.println(EWrapperMsgGenerator.tickByTickMidPoint(reqId, time, midPoint));
+        log.trace("Tick-by-Tick MidPoint: reqId={}, midPoint={}", reqId, midPoint);
     }
-    //! [tickbytickmidpoint]
 
-    //! [orderbound]
     @Override
     public void orderBound(long permId, int clientId, int orderId) {
-        System.out.println(EWrapperMsgGenerator.orderBound(permId, clientId, orderId));
+        orderLog.info("ORDER_BOUND | permId={} | clientId={} | orderId={}", permId, clientId, orderId);
     }
-    //! [orderbound]
 
-    //! [completedorder]
     @Override
     public void completedOrder(Contract contract, Order order, OrderState orderState) {
-        System.out.println(EWrapperMsgGenerator.completedOrder(contract, order, orderState));
+        orderLog.info("COMPLETED_ORDER | symbol={} | action={} | qty={} | status={}",
+                contract.symbol(), order.action(), order.totalQuantity(), orderState.status());
     }
-    //! [completedorder]
 
-    //! [completedordersend]
     @Override
     public void completedOrdersEnd() {
-        System.out.println(EWrapperMsgGenerator.completedOrdersEnd());
+        log.debug("Completed orders request finished");
     }
-    //! [completedordersend]
 
-    //! [replacefaend]
     @Override
     public void replaceFAEnd(int reqId, String text) {
-        System.out.println(EWrapperMsgGenerator.replaceFAEnd(reqId, text));
+        log.debug("Replace FA End: reqId={}, text={}", reqId, text);
     }
-    //! [replacefaend]
 
-    //! [wshMetaData]
     @Override
     public void wshMetaData(int reqId, String dataJson) {
-        System.out.println(EWrapperMsgGenerator.wshMetaData(reqId, dataJson));
+        log.debug("WSH Meta Data: reqId={}, dataLength={}", reqId, dataJson != null ? dataJson.length() : 0);
     }
-    //! [wshMetaData]
 
-    //! [wshEventData]
     @Override
     public void wshEventData(int reqId, String dataJson) {
-        System.out.println(EWrapperMsgGenerator.wshEventData(reqId, dataJson));
+        log.debug("WSH Event Data: reqId={}, dataLength={}", reqId, dataJson != null ? dataJson.length() : 0);
     }
-    //! [wshEventData]
 
-    //! [historicalSchedule]
     @Override
     public void historicalSchedule(int reqId, String startDateTime, String endDateTime, String timeZone, List<HistoricalSession> sessions) {
-        System.out.println(EWrapperMsgGenerator.historicalSchedule(reqId, startDateTime, endDateTime, timeZone, sessions));
+        log.debug("Historical Schedule: reqId={}, start={}, end={}, tz={}, sessions={}",
+                reqId, startDateTime, endDateTime, timeZone, sessions != null ? sessions.size() : 0);
     }
-    //! [historicalSchedule]
 
-    //! [userInfo]
     @Override
     public void userInfo(int reqId, String whiteBrandingId) {
-        System.out.println(EWrapperMsgGenerator.userInfo(reqId, whiteBrandingId));
+        log.debug("User Info: reqId={}, whiteBrandingId={}", reqId, whiteBrandingId);
     }
-    //! [userInfo]
 
-    //! [currentTimeInMillis]
     @Override
     public void currentTimeInMillis(long timeInMillis) {
-        System.out.println(EWrapperMsgGenerator.currentTimeInMillis(timeInMillis));
+        log.debug("Server time (millis): {}", timeInMillis);
     }
-    //! [currentTimeInMillis]
 
     // ---------------------------------------------- Protobuf ---------------------------------------------
     //! [orderStatus]

@@ -7,7 +7,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class RequestTracker <T> {
+    // A map of reqeuest ID → CompletableFuture (holds a promise that will eventually return data)
     private final ConcurrentHashMap<Integer, CompletableFuture<List<T>>> futures = new ConcurrentHashMap<>();
+    // A map of request ID -> List<T> -> Temporarily accumulates incoming data items for each request
     private final ConcurrentHashMap<Integer, List<T>> buffers = new ConcurrentHashMap<>();
     private final AtomicInteger nextId = new AtomicInteger(1000);
 
@@ -16,8 +18,8 @@ public class RequestTracker <T> {
     }
 
     public void start(int reqId, CompletableFuture<List<T>> future) {
-        futures.put(reqId, future);
         buffers.put(reqId, new ArrayList<>());
+        futures.put(reqId, future);
     }
 
     public void add(int reqId, T item) {

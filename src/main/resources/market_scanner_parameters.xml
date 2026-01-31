@@ -1,9 +1,4 @@
-Connected to Tws server version 203 at 20251222 13:19:45 SGT
-        Next Valid Order ID: 1
-        Connected : The list of managed accounts are : [U11822890,U6228825,]
-        SCANNER PARAMETERS:
-
-        <?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <ScanParameterResponse>
     <InstrumentList varName="instrumentList">
         <Instrument>

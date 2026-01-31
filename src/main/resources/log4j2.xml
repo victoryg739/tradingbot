@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN">
+
+    <Properties>
+        <Property name="log-path">logs</Property>
+    </Properties>
+
+    <Appenders>
+        <!-- Console Appender -->
+        <Console name="Console" target="SYSTEM_OUT">
+            <PatternLayout pattern="%d{HH:mm:ss.SSS} [%t] %highlight{%-5level}{FATAL=red blink, ERROR=red, WARN=yellow, INFO=green, DEBUG=cyan, TRACE=blue} %logger{36} - %msg%n"/>
+        </Console>
+
+        <!-- General Application Logs - 30 days retention -->
+        <RollingFile name="GeneralLogger"
+                     fileName="${log-path}/app.log"
+                     filePattern="${log-path}/archive/app-%d{yyyy-MM-dd}.log.gz">
+            <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level %logger{36} - %msg%n"/>
+            <Policies>
+                <TimeBasedTriggeringPolicy interval="1" modulate="true"/>
+            </Policies>
+            <DefaultRolloverStrategy>
+                <Delete basePath="${log-path}/archive" maxDepth="2">
+                    <IfFileName glob="app-*.log.gz"/>
+                    <IfLastModified age="30d"/>
+                </Delete>
+            </DefaultRolloverStrategy>
+        </RollingFile>
+
+        <!-- Order Audit Logs - 1 year retention -->
+        <RollingFile name="OrderAuditLogger"
+                     fileName="${log-path}/orders.log"
+                     filePattern="${log-path}/archive/orders-%d{yyyy-MM-dd}.log.gz">
+            <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss.SSS} | %msg%n"/>
+            <Policies>
+                <TimeBasedTriggeringPolicy interval="1" modulate="true"/>
+            </Policies>
+            <DefaultRolloverStrategy>
+                <Delete basePath="${log-path}/archive" maxDepth="2">
+                    <IfFileName glob="orders-*.log.gz"/>
+                    <IfLastModified age="365d"/>
+                </Delete>
+            </DefaultRolloverStrategy>
+        </RollingFile>
+    </Appenders>
+
+    <Loggers>
+        <!-- Order Audit Logger - retained for 1 year -->
+        <Logger name="ORDER_AUDIT" level="INFO" additivity="false">
+            <AppenderRef ref="Console"/>
+            <AppenderRef ref="OrderAuditLogger"/>
+        </Logger>
+
+        <!-- Root logger - general logs, 30 days -->
+        <Root level="INFO">
+            <AppenderRef ref="Console"/>
+            <AppenderRef ref="GeneralLogger"/>
+        </Root>
+    </Loggers>
+</Configuration>
