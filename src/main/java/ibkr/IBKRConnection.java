@@ -29,10 +29,13 @@ public class IBKRConnection {
 
     public void onConnect() throws InterruptedException, ExecutionException {
         String host = "127.0.0.1";
-        int port = 7497;
+//        int port = 7497; // TWS Port: 7497=paper
+
+        int port = 4002;  // IB Gateway: 4002=paper, 4001=live (TWS: 7497=paper, 7496=live)
+
         int clientId = 2;
 
-        log.info("Attempting to connect to TWS at {}:{} with clientId={}", host, port, clientId);
+        log.info("Attempting to connect to IB Gateway at {}:{} with clientId={}", host, port, clientId);
 
         client.setConnectOptions("+PACEAPI");
         client.optionalCapabilities("");

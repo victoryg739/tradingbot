@@ -388,9 +388,9 @@ public class LowFloatMomentum implements Strategy {
             List<PositionOutput> positions = ibkrConnection.reqPositions();
             position.closeAllPositions(positions);
             ibkrConnection.closeAllOrders();
-            System.out.println("[" + getName() + "] Closed all intraday positions and orders");
+            log.info("Closed all intraday positions and orders");
         } catch (Exception e) {
-            System.err.println("[" + getName() + "] Failed to close positions: " + e.getMessage());
+            log.error("Failed to close positions", e);
         }
     }
 

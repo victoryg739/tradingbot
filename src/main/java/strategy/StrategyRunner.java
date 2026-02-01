@@ -33,6 +33,10 @@ public class StrategyRunner {
     @Getter
     private volatile boolean running = false;
 
+    public List<Strategy> getStrategies() {
+        return new ArrayList<>(strategies);
+    }
+
     public StrategyRunner() {
         this.scheduler = Executors.newScheduledThreadPool(noOfStrategies);
         log.debug("StrategyRunner initialized with thread pool size={}", noOfStrategies);

@@ -8,15 +8,18 @@ import risk.Position;
 import risk.RiskManager;
 import strategy.LowFloatMomentum;
 import strategy.StrategyRunner;
+import ui.TradingBotTUI;
 
+import java.util.Arrays;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeoutException;
 
 public class TradingBot {
     private static final Logger log = LoggerFactory.getLogger(TradingBot.class);
 
     public static void main(String[] args) {
-        log.info("=== Trading Bot Starting ===");
+        boolean headless = Arrays.asList(args).contains("--headless");
+
+        log.info("=== Trading Bot Starting {} ===", headless ? "(headless mode)" : "(TUI mode)");
 
         IBKRConnection ibkrConnection = null;
         StrategyRunner strategyRunner = null;
@@ -37,32 +40,41 @@ public class TradingBot {
             strategyRunner.addStrategy(new LowFloatMomentum(ibkrConnection, position, riskManager));
             log.info("Strategy registered: LowFloatMomentum");
 
-            log.info("Starting strategy runner...");
-            strategyRunner.start();
-            
+            // Add shutdown hook for graceful shutdown
+            final IBKRConnection finalConnection = ibkrConnection;
+            final StrategyRunner finalRunner = strategyRunner;
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                log.info("=== Trading Bot Shutting Down ===");
+                if (finalRunner != null) {
+                    finalRunner.shutdown();
+                }
+                if (finalConnection != null) {
+                    finalConnection.onDisconnect();
+                }
+                log.info("=== Trading Bot Stopped ===");
+            }));
+
+            if (headless) {
+                // Headless mode - start immediately and run until interrupted
+                log.info("Starting strategy runner in headless mode...");
+                strategyRunner.start();
+
+                // Keep the main thread alive
+                Thread.currentThread().join();
+            } else {
+                // TUI mode - let user control via terminal UI
+                log.info("Launching Terminal UI...");
+                TradingBotTUI tui = new TradingBotTUI(ibkrConnection, strategyRunner);
+                tui.start();
+            }
+
         } catch (InterruptedException e) {
-            log.error("Bot interrupted during startup", e);
+            log.error("Bot interrupted", e);
             Thread.currentThread().interrupt();
         } catch (ExecutionException e) {
-            log.error("Execution error during startup: {}", e.getCause() != null ? e.getCause().getMessage() : e.getMessage(), e);
+            log.error("Execution error: {}", e.getCause() != null ? e.getCause().getMessage() : e.getMessage(), e);
         } catch (Exception e) {
-            log.error("Unexpected error during startup: {}", e.getMessage(), e);
+            log.error("Unexpected error: {}", e.getMessage(), e);
         }
-
-
-        //TODO: Check this function here
-        // Add shutdown hook for graceful shutdown
-        final IBKRConnection finalConnection = ibkrConnection;
-        final StrategyRunner finalRunner = strategyRunner;
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            log.info("=== Trading Bot Shutting Down ===");
-            if (finalRunner != null) {
-                finalRunner.shutdown();
-            }
-            if (finalConnection != null) {
-                finalConnection.onDisconnect();
-            }
-            log.info("=== Trading Bot Stopped ===");
-        }));
     }
 }
