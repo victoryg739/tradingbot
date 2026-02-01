@@ -9,6 +9,8 @@ import com.googlecode.lanterna.screen.Screen;
 import com.googlecode.lanterna.screen.TerminalScreen;
 import com.googlecode.lanterna.terminal.DefaultTerminalFactory;
 import com.googlecode.lanterna.terminal.Terminal;
+import com.googlecode.lanterna.TerminalSize;
+import com.googlecode.lanterna.terminal.swing.SwingTerminalFrame;
 import ibkr.IBKRConnection;
 import ibkr.model.AccountSummaryOutput;
 import ibkr.model.PositionOutput;
@@ -29,7 +31,7 @@ public class TradingBotTUI {
     private final IBKRConnection ibkrConnection;
     private final StrategyRunner strategyRunner;
 
-    private Terminal terminal;
+    private SwingTerminalFrame terminal;
     private Screen screen;
     private MultiWindowTextGUI gui;
     private BasicWindow mainWindow;
@@ -51,7 +53,21 @@ public class TradingBotTUI {
     }
 
     public void start() throws IOException {
-        terminal = new DefaultTerminalFactory().createTerminal();
+        terminal = new DefaultTerminalFactory()
+                .setInitialTerminalSize(new TerminalSize(100, 30))
+                .createSwingTerminal();
+        terminal.setVisible(true);
+
+        // Wait for window to be fully realized before starting screen
+        while (!terminal.isDisplayable() || terminal.getWidth() == 0) {
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while waiting for terminal", e);
+            }
+        }
+
         screen = new TerminalScreen(terminal);
         screen.startScreen();
 
