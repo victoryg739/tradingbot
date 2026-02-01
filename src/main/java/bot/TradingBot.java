@@ -33,7 +33,7 @@ public class TradingBot {
 
             ibkrConnection.onConnect();
 
-            int marketDataType = MarketDataType.DELAYED;
+            int marketDataType = MarketDataType.REALTIME;
             ibkrConnection.reqMarketDataType(marketDataType);
             log.debug("Market data type set to {}", MarketDataType.getField(marketDataType));
 
