@@ -255,10 +255,16 @@ public class LowFloatMomentum implements Strategy {
                 .chartOptions(null)
                 .build();
 
-        List<Bar> historicalData = ibkrConnection.reqHistoricalData(historicalDataInput);
-
-        //Clean Code way of doing npe checks - this way our callers dont need defensive check everywhere
-        return historicalData != null ? historicalData : Collections.emptyList();
+        try {
+            List<Bar> historicalData = ibkrConnection.reqHistoricalData(historicalDataInput);
+            return historicalData != null ? historicalData : Collections.emptyList();
+        } catch (TimeoutException e) {
+            log.warn("[{}] Historical data request timed out - skipping", contract.symbol());
+            return Collections.emptyList();
+        } catch (ExecutionException | InterruptedException e) {
+            log.warn("[{}] Historical data request failed: {}", contract.symbol(), e.getMessage());
+            return Collections.emptyList();
+        }
     }
 
 

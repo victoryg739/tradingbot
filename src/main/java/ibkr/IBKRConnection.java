@@ -106,6 +106,14 @@ public class IBKRConnection {
         client.reqMarketDataType(marketDataType);
     }
 
+    public String getMarketDataTypeString() {
+        return eWrapper.getMarketDataTypeString();
+    }
+
+    public boolean isMarketDataDelayed() {
+        return eWrapper.isMarketDataDelayed();
+    }
+
     public List<TickPriceOutput> reqMarketData(MarketDataInput marketDataInput) throws ExecutionException, InterruptedException, TimeoutException {
         String symbol = marketDataInput.getContract().symbol();
         log.debug("[{}] Requesting market data (snapshot={})", symbol, marketDataInput.isSnapshot());

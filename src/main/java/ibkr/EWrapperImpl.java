@@ -31,6 +31,9 @@ public class EWrapperImpl implements EWrapper {
 
     private RequestTrackerManager requestTrackerManager;
 
+    // Track market data type: 1=REALTIME, 2=FROZEN, 3=DELAYED, 4=DELAYED_FROZEN
+    private volatile int currentMarketDataType = 1; // Default to real-time
+
 //    private Map<Integer, Set<Integer>> receivedTickTypes = new ConcurrentHashMap<>();
 //    private Set<Integer> requiredTicks = Set.of(
 //            TickType.BID.index(),    // 1
@@ -341,7 +344,37 @@ public class EWrapperImpl implements EWrapper {
 
     @Override
     public void marketDataType(int reqId, int marketDataType) {
-        log.debug("Market data type: reqId={}, type={}", reqId, marketDataType);
+        this.currentMarketDataType = marketDataType;
+        String typeName = switch (marketDataType) {
+            case 1 -> "REALTIME";
+            case 2 -> "FROZEN";
+            case 3 -> "DELAYED";
+            case 4 -> "DELAYED_FROZEN";
+            default -> "UNKNOWN";
+        };
+        if (marketDataType != 1) {
+            log.warn("Market data type changed: reqId={}, type={} ({})", reqId, marketDataType, typeName);
+        } else {
+            log.debug("Market data type: reqId={}, type={} ({})", reqId, marketDataType, typeName);
+        }
+    }
+
+    public int getCurrentMarketDataType() {
+        return currentMarketDataType;
+    }
+
+    public String getMarketDataTypeString() {
+        return switch (currentMarketDataType) {
+            case 1 -> "REALTIME";
+            case 2 -> "FROZEN";
+            case 3 -> "DELAYED";
+            case 4 -> "DELAYED_FROZEN";
+            default -> "UNKNOWN";
+        };
+    }
+
+    public boolean isMarketDataDelayed() {
+        return currentMarketDataType == 3 || currentMarketDataType == 4;
     }
 
     @Override

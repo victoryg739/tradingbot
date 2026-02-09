@@ -13,6 +13,7 @@ import com.googlecode.lanterna.TerminalSize;
 import com.googlecode.lanterna.terminal.swing.SwingTerminalFrame;
 import ibkr.IBKRConnection;
 import ibkr.model.AccountSummaryOutput;
+import ibkr.model.OrderOutput;
 import ibkr.model.PositionOutput;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,9 +39,12 @@ public class TradingBotTUI {
 
     // UI Components that need updating
     private Label statusLabel;
+    private Label tradingModeLabel;
+    private Label marketDataTypeLabel;
     private Label accountLabel;
     private Label pnlLabel;
     private Label positionsCountLabel;
+    private Label ordersCountLabel;
     private Panel strategyPanel;
     private Button startStopButton;
 
@@ -106,6 +110,16 @@ public class TradingBotTUI {
     private Panel createStatusPanel() {
         Panel panel = new Panel(new GridLayout(2));
 
+        panel.addComponent(new Label("Trading Mode:").addStyle(SGR.BOLD));
+        tradingModeLabel = new Label("CHECKING...");
+        tradingModeLabel.addStyle(SGR.BOLD);
+        panel.addComponent(tradingModeLabel);
+
+        panel.addComponent(new Label("Market Data:").addStyle(SGR.BOLD));
+        marketDataTypeLabel = new Label("CHECKING...");
+        marketDataTypeLabel.addStyle(SGR.BOLD);
+        panel.addComponent(marketDataTypeLabel);
+
         panel.addComponent(new Label("Connection:"));
         statusLabel = new Label("CONNECTED");
         statusLabel.setForegroundColor(TextColor.ANSI.GREEN);
@@ -122,6 +136,10 @@ public class TradingBotTUI {
         panel.addComponent(new Label("Positions:"));
         positionsCountLabel = new Label("0");
         panel.addComponent(positionsCountLabel);
+
+        panel.addComponent(new Label("Open Orders:"));
+        ordersCountLabel = new Label("0");
+        panel.addComponent(ordersCountLabel);
 
         return panel;
     }
@@ -160,6 +178,7 @@ public class TradingBotTUI {
         panel.addComponent(startStopButton);
 
         panel.addComponent(new Button("Positions", this::showPositions));
+        panel.addComponent(new Button("Orders", this::showOrders));
         panel.addComponent(new Button("Refresh", this::refreshUI));
         panel.addComponent(new Button("Quit", this::confirmQuit));
 
@@ -224,6 +243,58 @@ public class TradingBotTUI {
         }
     }
 
+    private void showOrders() {
+        try {
+            List<OrderOutput> orders = ibkrConnection.reqAllOpenOrder();
+
+            BasicWindow ordersWindow = new BasicWindow("Open Orders");
+            ordersWindow.setHints(List.of(Window.Hint.CENTERED));
+
+            Panel panel = new Panel(new GridLayout(5));
+
+            // Header
+            panel.addComponent(new Label("Symbol").addStyle(SGR.BOLD));
+            panel.addComponent(new Label("Action").addStyle(SGR.BOLD));
+            panel.addComponent(new Label("Qty").addStyle(SGR.BOLD));
+            panel.addComponent(new Label("Type").addStyle(SGR.BOLD));
+            panel.addComponent(new Label("Status").addStyle(SGR.BOLD));
+
+            if (orders.isEmpty()) {
+                panel.addComponent(new Label("No open orders"));
+                panel.addComponent(new EmptySpace());
+                panel.addComponent(new EmptySpace());
+                panel.addComponent(new EmptySpace());
+                panel.addComponent(new EmptySpace());
+            } else {
+                for (OrderOutput order : orders) {
+                    panel.addComponent(new Label(order.getContract().symbol()));
+
+                    Label actionLabel = new Label(order.getOrder().action().name());
+                    actionLabel.setForegroundColor(
+                        order.getOrder().action().name().equals("BUY") ? TextColor.ANSI.GREEN : TextColor.ANSI.RED
+                    );
+                    panel.addComponent(actionLabel);
+
+                    panel.addComponent(new Label(order.getOrder().totalQuantity().toString()));
+                    panel.addComponent(new Label(order.getOrder().orderType().name()));
+                    panel.addComponent(new Label(order.getOrderState().status().name()));
+                }
+            }
+
+            Panel mainPanel = new Panel(new LinearLayout(Direction.VERTICAL));
+            mainPanel.addComponent(panel);
+            mainPanel.addComponent(new EmptySpace());
+            mainPanel.addComponent(new Button("Close", ordersWindow::close));
+
+            ordersWindow.setComponent(mainPanel);
+            gui.addWindowAndWait(ordersWindow);
+
+        } catch (Exception e) {
+            log.error("Failed to fetch orders", e);
+            MessageDialog.showMessageDialog(gui, "Error", "Failed to fetch orders: " + e.getMessage());
+        }
+    }
+
     private void refreshUI() {
         refreshStatusPanel();
         refreshStrategyPanel();
@@ -240,6 +311,14 @@ public class TradingBotTUI {
                 }
                 if ("AccountType".equals(summary.getTag())) {
                     accountLabel.setText(summary.getAccount() + " (" + summary.getValue() + ")");
+
+                    // Determine trading mode from account ID
+                    // Paper accounts start with "DU" or "DF", live accounts start with "U"
+                    String accountId = summary.getAccount();
+                    boolean isPaper = accountId.startsWith("DU") || accountId.startsWith("DF");
+                    tradingModeLabel.setText(isPaper ? "PAPER" : "LIVE");
+                    tradingModeLabel.setForegroundColor(isPaper ? TextColor.ANSI.YELLOW : TextColor.ANSI.RED_BRIGHT);
+                    tradingModeLabel.setBackgroundColor(isPaper ? TextColor.ANSI.BLACK : TextColor.ANSI.WHITE);
                 }
             }
 
@@ -247,6 +326,19 @@ public class TradingBotTUI {
             List<PositionOutput> positions = ibkrConnection.reqPositions();
             long activePositions = positions.stream().filter(p -> !p.getPos().isZero()).count();
             positionsCountLabel.setText(String.valueOf(activePositions));
+
+            // Get open orders count
+            List<OrderOutput> orders = ibkrConnection.reqAllOpenOrder();
+            ordersCountLabel.setText(String.valueOf(orders.size()));
+
+            // Update market data type
+            String marketDataType = ibkrConnection.getMarketDataTypeString();
+            boolean isDelayed = ibkrConnection.isMarketDataDelayed();
+            marketDataTypeLabel.setText(marketDataType);
+            marketDataTypeLabel.setForegroundColor(isDelayed ? TextColor.ANSI.RED_BRIGHT : TextColor.ANSI.GREEN);
+            if (isDelayed) {
+                marketDataTypeLabel.setBackgroundColor(TextColor.ANSI.YELLOW);
+            }
 
         } catch (Exception e) {
             log.warn("Failed to refresh status: {}", e.getMessage());
