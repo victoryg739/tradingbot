@@ -122,6 +122,8 @@ public class LowFloatMomentum implements Strategy {
 
 
         List<ScanData> filterStocks = scanLowFloatMovers();
+        List<OrderOutput> orders = ibkrConnection.reqAllOpenOrder();
+        List<PositionOutput> positions = ibkrConnection.reqPositions();
 
         for (ScanData filterStock : filterStocks) {
             if (filterStock.getContractDetails() == null || filterStock.getContractDetails().contract() == null) {
@@ -147,10 +149,8 @@ public class LowFloatMomentum implements Strategy {
             List<TickPriceOutput> tickPrices = getTickPrice(contract);
             boolean isStockTradeable = riskManager.isStockTradeable(tickPrices, contractDetails.tradingHours());
 
-            List<OrderOutput> orders = ibkrConnection.reqAllOpenOrder();
             boolean hasOrder = riskManager.hasOrder(orders, symbol);
 
-            List<PositionOutput> positions = ibkrConnection.reqPositions();
             boolean hasPosition = riskManager.hasPosition(positions, symbol);
 
             if (!isStockTradeable) {

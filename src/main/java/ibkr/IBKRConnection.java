@@ -131,9 +131,15 @@ public class IBKRConnection {
                 marketDataInput.isRegulatorySnapshot(),
                 marketDataInput.getTagValues());
 
-        List<TickPriceOutput> result = completableFuture.get(10, TimeUnit.SECONDS);
-        log.debug("[{}] Received {} tick prices", symbol, result.size());
-        return result;
+        try {
+            List<TickPriceOutput> result = completableFuture.get(10, TimeUnit.SECONDS);
+            log.debug("[{}] Received {} tick prices", symbol, result.size());
+            return result;
+        } catch (TimeoutException e) {
+            tickPriceTracker.timeout(reqId);
+            log.warn("[{}] Market data request timed out after 10 seconds", symbol);
+            throw e;
+        }
     }
 
     public List<Bar> reqHistoricalData(HistoricalDataInput historicalDataInput) throws ExecutionException, InterruptedException, TimeoutException {
@@ -156,9 +162,15 @@ public class IBKRConnection {
                 historicalDataInput.isKeepUpToDate(),
                 historicalDataInput.getChartOptions());
 
-        List<Bar> result = completableFuture.get(10, TimeUnit.SECONDS);
-        log.debug("[{}] Received {} historical bars", symbol, result.size());
-        return result;
+        try {
+            List<Bar> result = completableFuture.get(10, TimeUnit.SECONDS);
+            log.debug("[{}] Received {} historical bars", symbol, result.size());
+            return result;
+        } catch (TimeoutException e) {
+            historicalTracker.timeout(reqId);
+            log.warn("[{}] Historical data request timed out after 10 seconds", symbol);
+            throw e;
+        }
     }
 
     public ContractDetails reqContractDetails(Contract contract) throws ExecutionException, InterruptedException, TimeoutException {
@@ -171,7 +183,14 @@ public class IBKRConnection {
 
         client.reqContractDetails(reqId, contract);
 
-        List<ContractDetails> contractDetails = completableFuture.get(10, TimeUnit.SECONDS);
+        List<ContractDetails> contractDetails;
+        try {
+            contractDetails = completableFuture.get(10, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            contractDetailsTracker.timeout(reqId);
+            log.warn("[{}] Contract details request timed out after 10 seconds", contract.symbol());
+            throw e;
+        }
 
         if (contractDetails == null || contractDetails.isEmpty()) {
             log.error("[{}] No contract details found", contract.symbol());
@@ -191,7 +210,15 @@ public class IBKRConnection {
         scanDataTracker.start(reqId, completableFuture);
 
         client.reqScannerSubscription(reqId, scannerSubscription, new ArrayList<>(), filterOptions);
-        List<ScanData> results = completableFuture.get(10, TimeUnit.SECONDS);
+        List<ScanData> results;
+        try {
+            results = completableFuture.get(10, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            scanDataTracker.timeout(reqId);
+            log.warn("Market scan timed out after 10 seconds");
+            client.cancelScannerSubscription(reqId);
+            throw e;
+        }
         client.cancelScannerSubscription(reqId);
 
         log.debug("Market scan complete: {} results", results.size());
@@ -239,9 +266,15 @@ public class IBKRConnection {
 
         client.reqPositions();
 
-        List<PositionOutput> result = completableFuture.get(10, TimeUnit.SECONDS);
-        log.debug("Received {} positions", result.size());
-        return result;
+        try {
+            List<PositionOutput> result = completableFuture.get(10, TimeUnit.SECONDS);
+            log.debug("Received {} positions", result.size());
+            return result;
+        } catch (TimeoutException e) {
+            positionTracker.timeout(Constants.POSITIONS_REQ_ID);
+            log.warn("Positions request timed out after 10 seconds");
+            throw e;
+        }
     }
 
     public List<OrderOutput> reqAllOpenOrder() throws ExecutionException, InterruptedException, TimeoutException {
@@ -252,9 +285,15 @@ public class IBKRConnection {
 
         client.reqAllOpenOrders();
 
-        List<OrderOutput> result = completableFuture.get(10, TimeUnit.SECONDS);
-        log.debug("Received {} open orders", result.size());
-        return result;
+        try {
+            List<OrderOutput> result = completableFuture.get(10, TimeUnit.SECONDS);
+            log.debug("Received {} open orders", result.size());
+            return result;
+        } catch (TimeoutException e) {
+            orderTracker.timeout(Constants.OPEN_ORDERS_REQ_ID);
+            log.warn("Open orders request timed out after 10 seconds");
+            throw e;
+        }
     }
 
     public List<AccountSummaryOutput> reqAccountSummary(String tags) throws ExecutionException, InterruptedException, TimeoutException {
@@ -265,7 +304,15 @@ public class IBKRConnection {
         accountSummaryTracker.start(reqId, completableFuture);
 
         client.reqAccountSummary(reqId, "All", tags);
-        List<AccountSummaryOutput> result = completableFuture.get(10, TimeUnit.SECONDS);
+        List<AccountSummaryOutput> result;
+        try {
+            result = completableFuture.get(10, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            accountSummaryTracker.timeout(reqId);
+            log.warn("Account summary request timed out after 10 seconds");
+            client.cancelAccountSummary(reqId);
+            throw e;
+        }
         client.cancelAccountSummary(reqId);
 
         log.debug("Received {} account summary entries", result.size());
