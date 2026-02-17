@@ -20,7 +20,7 @@ public class Constants {
     public static final double SUB_DOLLAR_TICK_SIZE = 0.001;
 
     // How much risk % of the portfolio per trade
-    public static final double RISK_PER_TRADE = 0.05;
+    public static final double RISK_PER_TRADE = 0.03;
 
     public static final ZoneId EASTERN = ZoneId.of("America/New_York");
     public static LocalTime timeNow() {

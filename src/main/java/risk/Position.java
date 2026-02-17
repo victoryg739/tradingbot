@@ -57,7 +57,8 @@ public class Position {
         double vwap = firstBullishBar.wap().value().doubleValue();
         double atr = ATR.calculate(historicalBars, 10);
 
-        double rawStopLossPrice  = vwap - (0.5 * atr);
+        //TODO: check this ATR multiplier
+        double rawStopLossPrice  = vwap - (0.9 * atr);
         //TODO: Hardcode with my own mintick
         double stopLossPrice = roundToTick(rawStopLossPrice, Constants.STANDARD_TICK_SIZE, true);
 
