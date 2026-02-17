@@ -25,7 +25,7 @@ public class Position {
 
     // also differentitate strategies type
     IBKRConnection ibkrConnection;
-    private final int RISK_MULTIPLE = 2;
+    private final double RISK_MULTIPLE = 1.5;
 
     public Position(IBKRConnection ibkrConnection) {
         this.ibkrConnection = ibkrConnection;
@@ -58,7 +58,7 @@ public class Position {
         double atr = ATR.calculate(historicalBars, 10);
 
         //TODO: check this ATR multiplier
-        double rawStopLossPrice  = vwap - (0.9 * atr);
+        double rawStopLossPrice  = vwap - (1 * atr);
         //TODO: Hardcode with my own mintick
         double stopLossPrice = roundToTick(rawStopLossPrice, Constants.STANDARD_TICK_SIZE, true);
 
