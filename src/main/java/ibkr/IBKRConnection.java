@@ -39,6 +39,12 @@ public class IBKRConnection {
     private static final int[] RECONNECT_DELAYS_MS = {1000, 2000, 4000, 8000, 16000, 30000};
     private volatile boolean manualDisconnect = false;
 
+    // Connection generation counter to detect stale callbacks from old threads
+    private final AtomicInteger connectionGeneration = new AtomicInteger(0);
+    // Timestamp of last successful connection to implement cooldown
+    private volatile long lastConnectTime = 0;
+    private static final long RECONNECT_COOLDOWN_MS = 5000; // Ignore disconnects within 5s of connect
+
     public IBKRConnection() {
         eWrapper = new EWrapperImpl(requestTrackerManager, this);
         client = new EClientSocket( eWrapper, eSignal);
@@ -53,9 +59,20 @@ public class IBKRConnection {
                connectionState == ConnectionState.CONNECTED;
     }
 
+    public int getConnectionGeneration() {
+        return connectionGeneration.get();
+    }
+
     public void onConnect() throws InterruptedException, ExecutionException {
         connectionState = ConnectionState.CONNECTING;
         manualDisconnect = false;
+
+        // If already connected, disconnect first to avoid "Already connected" error
+        if (client.isConnected()) {
+            log.info("Already connected, disconnecting before reconnect...");
+            client.eDisconnect();
+            Thread.sleep(500); // Give time for clean disconnect
+        }
 
         String host = "127.0.0.1";
 //        int port = 7497; // TWS Port: 7497=paper
@@ -111,8 +128,13 @@ public class IBKRConnection {
         eWrapper.waitForInitOrderId();
         log.debug("Initial order ID received");
 
+        // Increment generation and record connect time BEFORE setting state to CONNECTED
+        // This ensures any stale callbacks from old threads can be detected
+        int gen = connectionGeneration.incrementAndGet();
+        lastConnectTime = System.currentTimeMillis();
+
         connectionState = ConnectionState.CONNECTED;
-        log.info("Connection fully established, state: {}", connectionState);
+        log.info("Connection fully established, state: {}, generation: {}", connectionState, gen);
     }
 
     private void processMessages() {
@@ -147,6 +169,15 @@ public class IBKRConnection {
 
         if (connectionState == ConnectionState.RECONNECTING) {
             log.debug("Already reconnecting, ignoring duplicate notification");
+            return;
+        }
+
+        // Check cooldown - ignore disconnects that happen shortly after a successful connection
+        // This prevents stale callbacks from old threads triggering reconnection loops
+        long timeSinceConnect = System.currentTimeMillis() - lastConnectTime;
+        if (timeSinceConnect < RECONNECT_COOLDOWN_MS && connectionState == ConnectionState.CONNECTED) {
+            log.info("Ignoring connection loss - within {}ms cooldown period ({}ms since connect), likely stale callback from old thread",
+                    RECONNECT_COOLDOWN_MS, timeSinceConnect);
             return;
         }
 
