@@ -9,9 +9,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import util.Constants;
 
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class IBKRConnection {
 
@@ -22,12 +24,39 @@ public class IBKRConnection {
     private final RequestTrackerManager requestTrackerManager = new RequestTrackerManager();
     private static final Logger log = LoggerFactory.getLogger(IBKRConnection.class);
 
+    // Connection state management
+    public enum ConnectionState {
+        DISCONNECTED,    // Not connected
+        CONNECTING,      // Initial connection in progress
+        CONNECTED,       // Fully connected and operational
+        RECONNECTING,    // Lost connection, attempting to reconnect
+        FAILED          // Reconnection failed permanently
+    }
+
+    private volatile ConnectionState connectionState = ConnectionState.DISCONNECTED;
+    private final AtomicInteger reconnectAttempts = new AtomicInteger(0);
+    private static final int MAX_RECONNECT_ATTEMPTS = 10;
+    private static final int[] RECONNECT_DELAYS_MS = {1000, 2000, 4000, 8000, 16000, 30000};
+    private volatile boolean manualDisconnect = false;
+
     public IBKRConnection() {
-        eWrapper = new EWrapperImpl(requestTrackerManager);
+        eWrapper = new EWrapperImpl(requestTrackerManager, this);
         client = new EClientSocket( eWrapper, eSignal);
     }
 
+    public ConnectionState getConnectionState() {
+        return connectionState;
+    }
+
+    public boolean isConnected() {
+        return client != null && client.isConnected() &&
+               connectionState == ConnectionState.CONNECTED;
+    }
+
     public void onConnect() throws InterruptedException, ExecutionException {
+        connectionState = ConnectionState.CONNECTING;
+        manualDisconnect = false;
+
         String host = "127.0.0.1";
 //        int port = 7497; // TWS Port: 7497=paper
 
@@ -81,6 +110,9 @@ public class IBKRConnection {
         log.debug("Waiting for initial order ID from TWS...");
         eWrapper.waitForInitOrderId();
         log.debug("Initial order ID received");
+
+        connectionState = ConnectionState.CONNECTED;
+        log.info("Connection fully established, state: {}", connectionState);
     }
 
     private void processMessages() {
@@ -97,8 +129,87 @@ public class IBKRConnection {
 
     public void onDisconnect() {
         log.info("Disconnecting from TWS...");
+        manualDisconnect = true;
+        connectionState = ConnectionState.DISCONNECTED;
         client.eDisconnect();
         log.info("Disconnected from TWS");
+    }
+
+    /**
+     * Called when connection loss is detected.
+     * Initiates reconnection sequence unless it was a manual disconnect.
+     */
+    public void handleConnectionLoss() {
+        if (manualDisconnect) {
+            log.info("Ignoring connection loss - was manual disconnect");
+            return;
+        }
+
+        if (connectionState == ConnectionState.RECONNECTING) {
+            log.debug("Already reconnecting, ignoring duplicate notification");
+            return;
+        }
+
+        log.warn("Connection loss detected, initiating reconnection sequence");
+        connectionState = ConnectionState.RECONNECTING;
+        reconnectAttempts.set(0);
+
+        // Start reconnection in separate thread (don't block callback)
+        new Thread(this::attemptReconnection, "IBKR-Reconnect").start();
+    }
+
+    /**
+     * Attempts to reconnect with exponential backoff.
+     * Runs in dedicated thread to avoid blocking.
+     */
+    private void attemptReconnection() {
+        while (reconnectAttempts.get() < MAX_RECONNECT_ATTEMPTS) {
+            int attempt = reconnectAttempts.incrementAndGet();
+
+            // Check if outside market hours - don't waste efforts
+            LocalTime now = Constants.timeNow();
+            if (now.isBefore(LocalTime.of(4, 0)) || now.isAfter(LocalTime.of(20, 0))) {
+                log.warn("Outside extended market hours (4 AM - 8 PM ET), stopping reconnection attempts");
+                connectionState = ConnectionState.FAILED;
+                return;
+            }
+
+            // Calculate delay with exponential backoff
+            int delayIndex = Math.min(attempt - 1, RECONNECT_DELAYS_MS.length - 1);
+            int delayMs = RECONNECT_DELAYS_MS[delayIndex];
+
+            log.info("Reconnection attempt {}/{} in {} seconds",
+                attempt, MAX_RECONNECT_ATTEMPTS, delayMs / 1000);
+
+            try {
+                Thread.sleep(delayMs);
+
+                // Clean up old connection
+                if (client.isConnected()) {
+                    client.eDisconnect();
+                    Thread.sleep(500);  // Brief pause for clean disconnect
+                }
+
+                // Attempt reconnection
+                log.info("Attempting to reconnect to IB Gateway...");
+                onConnect();  // Uses existing connection logic
+
+                // If we get here, connection succeeded
+                log.info("Reconnection successful on attempt {}", attempt);
+                reconnectAttempts.set(0);
+                return;
+
+            } catch (Exception e) {
+                log.error("Reconnection attempt {} failed: {}", attempt, e.getMessage());
+
+                if (reconnectAttempts.get() >= MAX_RECONNECT_ATTEMPTS) {
+                    log.error("Maximum reconnection attempts ({}) reached, giving up",
+                        MAX_RECONNECT_ATTEMPTS);
+                    connectionState = ConnectionState.FAILED;
+                    return;
+                }
+            }
+        }
     }
 
     public void reqMarketDataType(int marketDataType) {

@@ -302,6 +302,31 @@ public class TradingBotTUI {
 
     private void refreshStatusPanel() {
         try {
+            // Update connection status based on actual state
+            IBKRConnection.ConnectionState state = ibkrConnection.getConnectionState();
+            switch (state) {
+                case CONNECTED:
+                    statusLabel.setText("CONNECTED");
+                    statusLabel.setForegroundColor(TextColor.ANSI.GREEN);
+                    break;
+                case CONNECTING:
+                    statusLabel.setText("CONNECTING...");
+                    statusLabel.setForegroundColor(TextColor.ANSI.YELLOW);
+                    break;
+                case RECONNECTING:
+                    statusLabel.setText("RECONNECTING...");
+                    statusLabel.setForegroundColor(TextColor.ANSI.YELLOW);
+                    break;
+                case DISCONNECTED:
+                    statusLabel.setText("DISCONNECTED");
+                    statusLabel.setForegroundColor(TextColor.ANSI.RED);
+                    break;
+                case FAILED:
+                    statusLabel.setText("FAILED");
+                    statusLabel.setForegroundColor(TextColor.ANSI.RED);
+                    break;
+            }
+
             // Get account info
             List<AccountSummaryOutput> accountSummary = ibkrConnection.reqAccountSummary("NetLiquidation,AccountType");
 
@@ -341,6 +366,9 @@ public class TradingBotTUI {
             }
 
         } catch (Exception e) {
+            // If this fails, likely disconnected
+            statusLabel.setText("ERROR");
+            statusLabel.setForegroundColor(TextColor.ANSI.RED);
             log.warn("Failed to refresh status: {}", e.getMessage());
         }
     }

@@ -31,7 +31,7 @@ public class TradingBot {
             Position position = new Position(ibkrConnection);
             RiskManager riskManager = new RiskManager();
 
-            strategyRunner = new StrategyRunner();
+            strategyRunner = new StrategyRunner(ibkrConnection);
 
             ibkrConnection.onConnect();
 

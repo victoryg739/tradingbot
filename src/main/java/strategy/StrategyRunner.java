@@ -1,5 +1,6 @@
 package strategy;
 
+import ibkr.IBKRConnection;
 import lombok.Getter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,6 +24,7 @@ import java.util.concurrent.TimeUnit;
 public class StrategyRunner {
     private static final Logger log = LoggerFactory.getLogger(StrategyRunner.class);
 
+    private final IBKRConnection ibkrConnection;
     private final ScheduledExecutorService scheduler;
     private final List<Strategy> strategies = new ArrayList<>();
     private final List<ScheduledFuture<?>> scheduledTasks = new ArrayList<>();
@@ -37,7 +39,8 @@ public class StrategyRunner {
         return new ArrayList<>(strategies);
     }
 
-    public StrategyRunner() {
+    public StrategyRunner(IBKRConnection ibkrConnection) {
+        this.ibkrConnection = ibkrConnection;
         this.scheduler = Executors.newScheduledThreadPool(noOfStrategies);
         log.debug("StrategyRunner initialized with thread pool size={}", noOfStrategies);
     }
@@ -124,6 +127,19 @@ public class StrategyRunner {
 
     private void executeStrategy(Strategy strategy) {
         if (!running) return;
+
+        // Check connection state before executing strategy
+        if (ibkrConnection == null || !ibkrConnection.isConnected()) {
+            IBKRConnection.ConnectionState state = ibkrConnection != null ?
+                    ibkrConnection.getConnectionState() : IBKRConnection.ConnectionState.DISCONNECTED;
+            if (state == IBKRConnection.ConnectionState.RECONNECTING) {
+                log.debug("[{}] Skipping - reconnection in progress", strategy.getName());
+            } else {
+                log.warn("[{}] Skipping - not connected to IB Gateway (state: {})",
+                        strategy.getName(), state);
+            }
+            return;
+        }
 
         String strategyName = strategy.getName();
         try {

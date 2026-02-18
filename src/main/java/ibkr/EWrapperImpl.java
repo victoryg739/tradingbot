@@ -30,6 +30,7 @@ public class EWrapperImpl implements EWrapper {
     //! [socket_declare]
 
     private RequestTrackerManager requestTrackerManager;
+    private IBKRConnection ibkrConnection;
 
     // Track market data type: 1=REALTIME, 2=FROZEN, 3=DELAYED, 4=DELAYED_FROZEN
     private volatile int currentMarketDataType = 1; // Default to real-time
@@ -42,10 +43,11 @@ public class EWrapperImpl implements EWrapper {
 //    );
 
     //! [socket_init]
-    public EWrapperImpl(RequestTrackerManager requestTrackerManager) {
+    public EWrapperImpl(RequestTrackerManager requestTrackerManager, IBKRConnection ibkrConnection) {
         readerSignal = new EJavaSignal();
         clientSocket = new EClientSocket(this, readerSignal);
         this.requestTrackerManager = requestTrackerManager;
+        this.ibkrConnection = ibkrConnection;
     }
     //! [socket_init]
     public EClientSocket getClient() {
@@ -482,6 +484,25 @@ public class EWrapperImpl implements EWrapper {
     public void error(int id, long errorTime, int errorCode, String errorMsg, String advancedOrderRejectJson) {
         String errorTimeStr = errorTime != 0 ? Util.UnixMillisecondsToString(errorTime, "yyyyMMdd-HH:mm:ss") : "";
 
+        // Handle connection loss error codes
+        if (errorCode == 1100) {  // Connectivity lost
+            log.error("TWS Error 1100: Connectivity lost - triggering reconnection");
+            if (ibkrConnection != null) {
+                ibkrConnection.handleConnectionLoss();
+            }
+        } else if (errorCode == 1101) {  // Connectivity restored
+            log.info("TWS Error 1101: Connectivity restored - data farm connection back");
+            // Connection is automatically restored by IBKR, just log
+        } else if (errorCode == 1102) {  // Connectivity lost - data farm
+            log.warn("TWS Error 1102: Data farm connectivity lost");
+            // Don't trigger full reconnect for data farm only
+        } else if (errorCode == 504) {  // Not connected
+            log.error("TWS Error 504: Not connected - triggering reconnection");
+            if (ibkrConnection != null) {
+                ibkrConnection.handleConnectionLoss();
+            }
+        }
+
         // Categorize errors by code ranges for appropriate log levels
         // 2100-2169: Warnings (connectivity, market data farm connections)
         // 10000+: System messages (often informational)
@@ -502,7 +523,15 @@ public class EWrapperImpl implements EWrapper {
 
     @Override
     public void connectionClosed() {
-        log.warn("TWS connection closed");
+        log.error("TWS connection closed unexpectedly");
+
+        // Cancel all pending requests
+        requestTrackerManager.cancelAllPending("Connection closed");
+
+        // Trigger reconnection (if not manual disconnect)
+        if (ibkrConnection != null) {
+            ibkrConnection.handleConnectionLoss();
+        }
     }
 
     @Override

@@ -1,5 +1,10 @@
 package data;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -8,6 +13,8 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class RequestTracker <T> {
+    private static final Logger log = LoggerFactory.getLogger(RequestTracker.class);
+
     // A map of reqeuest ID → CompletableFuture (holds a promise that will eventually return data)
     private final ConcurrentHashMap<Integer, CompletableFuture<List<T>>> futures = new ConcurrentHashMap<>();
     // A map of request ID -> List<T> -> Temporarily accumulates incoming data items for each request
@@ -52,6 +59,28 @@ public class RequestTracker <T> {
         startTimes.remove(reqId);
         if (future != null && !future.isDone()) {
             future.completeExceptionally(new TimeoutException("Request " + reqId + " timed out after 10 seconds"));
+        }
+    }
+
+    /**
+     * Cancels all pending futures.
+     * Called during disconnection to fail-fast instead of waiting for timeouts.
+     */
+    public void cancelAll(String reason) {
+        List<Integer> reqIds = new ArrayList<>(futures.keySet());
+
+        log.info("Cancelling {} pending requests: {}", reqIds.size(), reason);
+
+        for (int reqId : reqIds) {
+            CompletableFuture<List<T>> future = futures.remove(reqId);
+            buffers.remove(reqId);
+            startTimes.remove(reqId);
+
+            if (future != null && !future.isDone()) {
+                future.completeExceptionally(
+                    new IOException("Connection lost: " + reason)
+                );
+            }
         }
     }
 }
