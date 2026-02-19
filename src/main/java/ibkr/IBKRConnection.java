@@ -190,6 +190,28 @@ public class IBKRConnection {
     }
 
     /**
+     * Called when IBKR reports connectivity has been restored (error 1101/1102).
+     * Resets connection state from FAILED/RECONNECTING back to CONNECTED.
+     */
+    public void handleConnectionRestored() {
+        ConnectionState previousState = connectionState;
+
+        if (previousState == ConnectionState.CONNECTED) {
+            log.debug("Connection restored notification received, but already in CONNECTED state - ignoring");
+            return;
+        }
+
+        // Update state and timestamps
+        connectionState = ConnectionState.CONNECTED;
+        lastConnectTime = System.currentTimeMillis();
+        int gen = connectionGeneration.incrementAndGet();
+        reconnectAttempts.set(0);
+
+        log.info("Connection restored by IBKR (previous state: {}), now CONNECTED (generation: {})",
+                previousState, gen);
+    }
+
+    /**
      * Attempts to reconnect with exponential backoff.
      * Runs in dedicated thread to avoid blocking.
      */

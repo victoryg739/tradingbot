@@ -484,18 +484,22 @@ public class EWrapperImpl implements EWrapper {
     public void error(int id, long errorTime, int errorCode, String errorMsg, String advancedOrderRejectJson) {
         String errorTimeStr = errorTime != 0 ? Util.UnixMillisecondsToString(errorTime, "yyyyMMdd-HH:mm:ss") : "";
 
-        // Handle connection loss error codes
+        // Handle connection loss/restore error codes
         if (errorCode == 1100) {  // Connectivity lost
             log.error("TWS Error 1100: Connectivity lost - triggering reconnection");
             if (ibkrConnection != null) {
                 ibkrConnection.handleConnectionLoss();
             }
-        } else if (errorCode == 1101) {  // Connectivity restored
-            log.info("TWS Error 1101: Connectivity restored - data farm connection back");
-            // Connection is automatically restored by IBKR, just log
-        } else if (errorCode == 1102) {  // Connectivity lost - data farm
-            log.warn("TWS Error 1102: Data farm connectivity lost");
-            // Don't trigger full reconnect for data farm only
+        } else if (errorCode == 1101) {  // Connectivity restored - data lost
+            log.info("TWS Error 1101: Connectivity restored (data lost) - resetting connection state");
+            if (ibkrConnection != null) {
+                ibkrConnection.handleConnectionRestored();
+            }
+        } else if (errorCode == 1102) {  // Connectivity restored - data maintained
+            log.info("TWS Error 1102: Connectivity restored (data maintained) - resetting connection state");
+            if (ibkrConnection != null) {
+                ibkrConnection.handleConnectionRestored();
+            }
         } else if (errorCode == 504) {  // Not connected
             log.error("TWS Error 504: Not connected - triggering reconnection");
             if (ibkrConnection != null) {
