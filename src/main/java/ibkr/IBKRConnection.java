@@ -13,6 +13,7 @@ import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class IBKRConnection {
@@ -34,7 +35,7 @@ public class IBKRConnection {
     }
 
     private volatile ConnectionState connectionState = ConnectionState.DISCONNECTED;
-    private final AtomicInteger reconnectAttempts = new AtomicInteger(0);
+    private final AtomicBoolean isReconnecting = new AtomicBoolean(false);
     private static final int MAX_RECONNECT_ATTEMPTS = 10;
     private static final int[] RECONNECT_DELAYS_MS = {1000, 2000, 4000, 8000, 16000, 30000};
     private volatile boolean manualDisconnect = false;
@@ -167,11 +168,6 @@ public class IBKRConnection {
             return;
         }
 
-        if (connectionState == ConnectionState.RECONNECTING) {
-            log.debug("Already reconnecting, ignoring duplicate notification");
-            return;
-        }
-
         // Check cooldown - ignore disconnects that happen shortly after a successful connection
         // This prevents stale callbacks from old threads triggering reconnection loops
         long timeSinceConnect = System.currentTimeMillis() - lastConnectTime;
@@ -181,9 +177,16 @@ public class IBKRConnection {
             return;
         }
 
+        // Atomic check-and-set: only the first caller starts reconnection, all others return immediately.
+        // This guards against the CONNECTING state (set by onConnect()) bypassing the old state check,
+        // which caused multiple concurrent reconnect threads to spawn on every failed attempt.
+        if (!isReconnecting.compareAndSet(false, true)) {
+            log.debug("Already reconnecting, ignoring duplicate notification");
+            return;
+        }
+
         log.warn("Connection loss detected, initiating reconnection sequence");
         connectionState = ConnectionState.RECONNECTING;
-        reconnectAttempts.set(0);
 
         // Start reconnection in separate thread (don't block callback)
         new Thread(this::attemptReconnection, "IBKR-Reconnect").start();
@@ -194,21 +197,22 @@ public class IBKRConnection {
      * Performs a clean reconnect to avoid message stream corruption.
      */
     public void handleConnectionRestored() {
-        ConnectionState previousState = connectionState;
-
-        if (previousState == ConnectionState.CONNECTED) {
+        if (connectionState == ConnectionState.CONNECTED) {
             log.debug("Connection restored notification received, but already in CONNECTED state - ignoring");
             return;
         }
 
-        log.info("IBKR reports connectivity restored (previous state: {}), performing clean reconnect...", previousState);
+        if (!isReconnecting.compareAndSet(false, true)) {
+            log.debug("Reconnection already in progress, ignoring restore notification");
+            return;
+        }
+
+        log.info("IBKR reports connectivity restored (previous state: {}), performing clean reconnect...", connectionState);
 
         // Cancel any pending requests with corrupted state
         requestTrackerManager.cancelAllPending("Connection restored - cleaning up stale requests");
-
-        // Do a clean reconnect in a separate thread
         connectionState = ConnectionState.RECONNECTING;
-        reconnectAttempts.set(0);
+
         new Thread(() -> {
             try {
                 // Disconnect cleanly first
@@ -225,6 +229,8 @@ public class IBKRConnection {
             } catch (Exception e) {
                 log.error("Clean reconnect failed after IBKR auto-restore: {}", e.getMessage());
                 connectionState = ConnectionState.FAILED;
+            } finally {
+                isReconnecting.set(false);
             }
         }, "IBKR-CleanReconnect").start();
     }
@@ -234,52 +240,52 @@ public class IBKRConnection {
      * Runs in dedicated thread to avoid blocking.
      */
     private void attemptReconnection() {
-        while (reconnectAttempts.get() < MAX_RECONNECT_ATTEMPTS) {
-            int attempt = reconnectAttempts.incrementAndGet();
+        try {
+            for (int attempt = 1; attempt <= MAX_RECONNECT_ATTEMPTS; attempt++) {
 
-            // Check if outside market hours - don't waste efforts
-            LocalTime now = Constants.timeNow();
-            if (now.isBefore(LocalTime.of(4, 0)) || now.isAfter(LocalTime.of(20, 0))) {
-                log.warn("Outside extended market hours (4 AM - 8 PM ET), stopping reconnection attempts");
-                connectionState = ConnectionState.FAILED;
-                return;
-            }
-
-            // Calculate delay with exponential backoff
-            int delayIndex = Math.min(attempt - 1, RECONNECT_DELAYS_MS.length - 1);
-            int delayMs = RECONNECT_DELAYS_MS[delayIndex];
-
-            log.info("Reconnection attempt {}/{} in {} seconds",
-                attempt, MAX_RECONNECT_ATTEMPTS, delayMs / 1000);
-
-            try {
-                Thread.sleep(delayMs);
-
-                // Clean up old connection
-                if (client.isConnected()) {
-                    client.eDisconnect();
-                    Thread.sleep(500);  // Brief pause for clean disconnect
-                }
-
-                // Attempt reconnection
-                log.info("Attempting to reconnect to IB Gateway...");
-                onConnect();  // Uses existing connection logic
-
-                // If we get here, connection succeeded
-                log.info("Reconnection successful on attempt {}", attempt);
-                reconnectAttempts.set(0);
-                return;
-
-            } catch (Exception e) {
-                log.error("Reconnection attempt {} failed: {}", attempt, e.getMessage());
-
-                if (reconnectAttempts.get() >= MAX_RECONNECT_ATTEMPTS) {
-                    log.error("Maximum reconnection attempts ({}) reached, giving up",
-                        MAX_RECONNECT_ATTEMPTS);
+                // Check if outside market hours - don't waste efforts
+                LocalTime now = Constants.timeNow();
+                if (now.isBefore(LocalTime.of(4, 0)) || now.isAfter(LocalTime.of(20, 0))) {
+                    log.warn("Outside extended market hours (4 AM - 8 PM ET), stopping reconnection attempts");
                     connectionState = ConnectionState.FAILED;
                     return;
                 }
+
+                // Calculate delay with exponential backoff
+                int delayIndex = Math.min(attempt - 1, RECONNECT_DELAYS_MS.length - 1);
+                int delayMs = RECONNECT_DELAYS_MS[delayIndex];
+
+                log.info("Reconnection attempt {}/{} in {} seconds",
+                        attempt, MAX_RECONNECT_ATTEMPTS, delayMs / 1000);
+
+                try {
+                    Thread.sleep(delayMs);
+
+                    // Clean up old connection
+                    if (client.isConnected()) {
+                        client.eDisconnect();
+                        Thread.sleep(500);  // Brief pause for clean disconnect
+                    }
+
+                    // Attempt reconnection
+                    log.info("Attempting to reconnect to IB Gateway...");
+                    onConnect();
+
+                    // If we get here, connection succeeded
+                    log.info("Reconnection successful on attempt {}", attempt);
+                    return;
+
+                } catch (Exception e) {
+                    log.error("Reconnection attempt {} failed: {}", attempt, e.getMessage());
+                    if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+                        log.error("Maximum reconnection attempts ({}) reached, giving up", MAX_RECONNECT_ATTEMPTS);
+                        connectionState = ConnectionState.FAILED;
+                    }
+                }
             }
+        } finally {
+            // Always release the lock so future connection losses can trigger a new reconnection sequence
+            isReconnecting.set(false);
         }
     }
 
