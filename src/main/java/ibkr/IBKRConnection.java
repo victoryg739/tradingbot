@@ -191,7 +191,7 @@ public class IBKRConnection {
 
     /**
      * Called when IBKR reports connectivity has been restored (error 1101/1102).
-     * Resets connection state from FAILED/RECONNECTING back to CONNECTED.
+     * Performs a clean reconnect to avoid message stream corruption.
      */
     public void handleConnectionRestored() {
         ConnectionState previousState = connectionState;
@@ -201,14 +201,32 @@ public class IBKRConnection {
             return;
         }
 
-        // Update state and timestamps
-        connectionState = ConnectionState.CONNECTED;
-        lastConnectTime = System.currentTimeMillis();
-        int gen = connectionGeneration.incrementAndGet();
-        reconnectAttempts.set(0);
+        log.info("IBKR reports connectivity restored (previous state: {}), performing clean reconnect...", previousState);
 
-        log.info("Connection restored by IBKR (previous state: {}), now CONNECTED (generation: {})",
-                previousState, gen);
+        // Cancel any pending requests with corrupted state
+        requestTrackerManager.cancelAllPending("Connection restored - cleaning up stale requests");
+
+        // Do a clean reconnect in a separate thread
+        connectionState = ConnectionState.RECONNECTING;
+        reconnectAttempts.set(0);
+        new Thread(() -> {
+            try {
+                // Disconnect cleanly first
+                if (client.isConnected()) {
+                    client.eDisconnect();
+                    Thread.sleep(1000); // Give time for clean disconnect
+                }
+
+                // Reconnect
+                log.info("Performing clean reconnect after IBKR auto-restore...");
+                onConnect();
+                log.info("Clean reconnect successful after IBKR auto-restore");
+
+            } catch (Exception e) {
+                log.error("Clean reconnect failed after IBKR auto-restore: {}", e.getMessage());
+                connectionState = ConnectionState.FAILED;
+            }
+        }, "IBKR-CleanReconnect").start();
     }
 
     /**
