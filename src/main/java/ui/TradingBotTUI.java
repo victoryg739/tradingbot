@@ -3,6 +3,7 @@ package ui;
 import com.googlecode.lanterna.SGR;
 import com.googlecode.lanterna.TextColor;
 import com.googlecode.lanterna.gui2.*;
+import com.googlecode.lanterna.gui2.ComboBox;
 import com.googlecode.lanterna.gui2.dialogs.MessageDialog;
 import com.googlecode.lanterna.gui2.dialogs.MessageDialogButton;
 import com.googlecode.lanterna.screen.Screen;
@@ -23,10 +24,12 @@ import trade.TradeJournal;
 import trade.TradeRecord;
 
 import java.io.IOException;
-import java.util.List;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 public class TradingBotTUI {
     private static final Logger log = LoggerFactory.getLogger(TradingBotTUI.class);
@@ -305,21 +308,80 @@ public class TradingBotTUI {
         }
     }
 
+    private static final String ALL_STRATEGIES = "All Strategies";
+
+    private static final String[] PERIOD_LABELS  = {"Today (1d)", "Last 7 days", "Last 30 days", "Last 90 days"};
+    private static final int[]    PERIOD_DAYS     = {1,            7,              30,              90};
+
     private void showPnL() {
-        BasicWindow pnlWindow = new BasicWindow("P&L Report (Today)");
+        showPnLDialog(ALL_STRATEGIES, 1);
+    }
+
+    private void showPnLDialog(String strategyFilter, int loadedDays) {
+        List<TradeRecord> allTrades = tradeJournal.getCompletedTrades();
+
+        // Build strategy list dynamically from journal
+        List<String> strategyOptions = new ArrayList<>();
+        strategyOptions.add(ALL_STRATEGIES);
+        allTrades.stream()
+                .map(TradeRecord::getStrategy)
+                .distinct()
+                .sorted()
+                .forEach(strategyOptions::add);
+
+        // Apply strategy filter
+        List<TradeRecord> filteredTrades = allTrades.stream()
+                .filter(t -> strategyFilter.equals(ALL_STRATEGIES) || t.getStrategy().equals(strategyFilter))
+                .collect(Collectors.toList());
+
+        BasicWindow pnlWindow = new BasicWindow("P&L Report");
         pnlWindow.setHints(List.of(Window.Hint.CENTERED));
 
         Panel mainPanel = new Panel(new LinearLayout(Direction.VERTICAL));
 
-        // --- Strategy Summary ---
-        Panel summaryHeader = new Panel(new LinearLayout(Direction.HORIZONTAL));
-        summaryHeader.addComponent(new Label("Strategy Summary").addStyle(SGR.BOLD));
-        mainPanel.addComponent(summaryHeader);
+        // --- History load panel ---
+        Panel historyRow = new Panel(new LinearLayout(Direction.HORIZONTAL));
+        historyRow.addComponent(new Label("Period:"));
+        ComboBox<String> periodCombo = new ComboBox<>(PERIOD_LABELS);
+        // Pre-select the combo to match currently loaded period
+        for (int i = 0; i < PERIOD_DAYS.length; i++) {
+            if (PERIOD_DAYS[i] == loadedDays) { periodCombo.setSelectedIndex(i); break; }
+        }
+        historyRow.addComponent(periodCombo);
+        historyRow.addComponent(new Button("Load", () -> {
+            int idx = periodCombo.getSelectedIndex();
+            int days = PERIOD_DAYS[idx >= 0 && idx < PERIOD_DAYS.length ? idx : 0];
+            pnlWindow.close();
+            ibkrConnection.reqExecutions(days);
+            MessageDialog.showMessageDialog(gui, "Loading",
+                    "Fetching " + PERIOD_LABELS[idx] + " of history from IBKR.\n" +
+                    "Reopen P&L in a few seconds to see the results.");
+        }));
+        mainPanel.addComponent(historyRow.withBorder(Borders.singleLine("History")));
 
-        java.util.Map<String, TradeJournal.StrategySummary> summaries = tradeJournal.getStrategySummaries();
+        // --- Strategy filter panel ---
+        Panel strategyRow = new Panel(new LinearLayout(Direction.HORIZONTAL));
+        strategyRow.addComponent(new Label("Strategy:"));
+        ComboBox<String> strategyCombo = new ComboBox<>(strategyOptions.toArray(new String[0]));
+        int stratIdx = strategyOptions.indexOf(strategyFilter);
+        if (stratIdx >= 0) strategyCombo.setSelectedIndex(stratIdx);
+        strategyRow.addComponent(strategyCombo);
+        strategyRow.addComponent(new Button("Apply", () -> {
+            String selected = strategyCombo.getSelectedItem();
+            pnlWindow.close();
+            showPnLDialog(selected != null ? selected : ALL_STRATEGIES, loadedDays);
+        }));
+        mainPanel.addComponent(strategyRow.withBorder(Borders.singleLine("Filter")));
+
+        mainPanel.addComponent(new EmptySpace());
+
+        // --- Strategy Summary ---
+        mainPanel.addComponent(new Label("Strategy Summary").addStyle(SGR.BOLD));
+
+        Map<String, TradeJournal.StrategySummary> summaries = buildSummaries(filteredTrades);
 
         if (summaries.isEmpty()) {
-            mainPanel.addComponent(new Label("No completed trades this session"));
+            mainPanel.addComponent(new Label("No completed trades for selected filter."));
         } else {
             Panel summaryPanel = new Panel(new GridLayout(5));
             summaryPanel.addComponent(new Label("Strategy").addStyle(SGR.BOLD));
@@ -349,37 +411,36 @@ public class TradingBotTUI {
         // --- Trade History ---
         mainPanel.addComponent(new Label("Trade History").addStyle(SGR.BOLD));
 
-        List<TradeRecord> trades = tradeJournal.getCompletedTrades();
-        if (trades.isEmpty()) {
-            mainPanel.addComponent(new Label("No completed trades this session"));
+        if (filteredTrades.isEmpty()) {
+            mainPanel.addComponent(new Label("No trades for selected filter."));
         } else {
-            Panel historyPanel = new Panel(new GridLayout(6));
-            historyPanel.addComponent(new Label("Time").addStyle(SGR.BOLD));
-            historyPanel.addComponent(new Label("Symbol").addStyle(SGR.BOLD));
-            historyPanel.addComponent(new Label("Qty").addStyle(SGR.BOLD));
-            historyPanel.addComponent(new Label("Fill $").addStyle(SGR.BOLD));
-            historyPanel.addComponent(new Label("P&L").addStyle(SGR.BOLD));
-            historyPanel.addComponent(new Label("Strategy").addStyle(SGR.BOLD));
+            Panel histPanel = new Panel(new GridLayout(6));
+            histPanel.addComponent(new Label("Time").addStyle(SGR.BOLD));
+            histPanel.addComponent(new Label("Symbol").addStyle(SGR.BOLD));
+            histPanel.addComponent(new Label("Qty").addStyle(SGR.BOLD));
+            histPanel.addComponent(new Label("Fill $").addStyle(SGR.BOLD));
+            histPanel.addComponent(new Label("P&L").addStyle(SGR.BOLD));
+            histPanel.addComponent(new Label("Strategy").addStyle(SGR.BOLD));
 
-            java.time.format.DateTimeFormatter timeFmt = java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss");
-            for (TradeRecord trade : trades) {
+            DateTimeFormatter timeFmt = DateTimeFormatter.ofPattern("MM/dd HH:mm:ss");
+            for (TradeRecord trade : filteredTrades) {
                 String timeStr = trade.getTime() != null ? trade.getTime().format(timeFmt) : "-";
-                historyPanel.addComponent(new Label(timeStr));
-                historyPanel.addComponent(new Label(trade.getSymbol()));
-                historyPanel.addComponent(new Label(String.valueOf((int) trade.getShares())));
-                historyPanel.addComponent(new Label(String.format("$%.2f", trade.getFillPrice())));
+                histPanel.addComponent(new Label(timeStr));
+                histPanel.addComponent(new Label(trade.getSymbol()));
+                histPanel.addComponent(new Label(String.valueOf((int) trade.getShares())));
+                histPanel.addComponent(new Label(String.format("$%.2f", trade.getFillPrice())));
 
                 if (trade.isClosingTrade()) {
                     Label pnlLabel = new Label(String.format("%+$.2f", trade.getNetPnL()));
                     pnlLabel.setForegroundColor(trade.getNetPnL() >= 0 ? TextColor.ANSI.GREEN : TextColor.ANSI.RED);
-                    historyPanel.addComponent(pnlLabel);
+                    histPanel.addComponent(pnlLabel);
                 } else {
-                    historyPanel.addComponent(new Label("OPEN"));
+                    histPanel.addComponent(new Label("OPEN"));
                 }
 
-                historyPanel.addComponent(new Label(trade.getStrategy()));
+                histPanel.addComponent(new Label(trade.getStrategy()));
             }
-            mainPanel.addComponent(historyPanel.withBorder(Borders.singleLine()));
+            mainPanel.addComponent(histPanel.withBorder(Borders.singleLine()));
         }
 
         mainPanel.addComponent(new EmptySpace());
@@ -387,6 +448,24 @@ public class TradingBotTUI {
 
         pnlWindow.setComponent(mainPanel);
         gui.addWindowAndWait(pnlWindow);
+    }
+
+    /** Builds strategy summaries from an arbitrary list of trades (supports filtered views). */
+    private Map<String, TradeJournal.StrategySummary> buildSummaries(List<TradeRecord> trades) {
+        Map<String, List<TradeRecord>> byStrategy = new LinkedHashMap<>();
+        for (TradeRecord t : trades) {
+            byStrategy.computeIfAbsent(t.getStrategy(), k -> new ArrayList<>()).add(t);
+        }
+        Map<String, TradeJournal.StrategySummary> result = new LinkedHashMap<>();
+        for (Map.Entry<String, List<TradeRecord>> e : byStrategy.entrySet()) {
+            List<TradeRecord> ts = e.getValue();
+            int total = ts.size();
+            int winners = (int) ts.stream().filter(t -> t.isClosingTrade() && t.getNetPnL() > 0).count();
+            double netPnL = ts.stream().filter(TradeRecord::isClosingTrade).mapToDouble(TradeRecord::getNetPnL).sum();
+            double commission = ts.stream().mapToDouble(TradeRecord::getCommission).sum();
+            result.put(e.getKey(), new TradeJournal.StrategySummary(e.getKey(), total, winners, netPnL, commission));
+        }
+        return result;
     }
 
     private void refreshUI() {
