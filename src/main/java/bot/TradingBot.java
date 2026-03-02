@@ -39,6 +39,9 @@ public class TradingBot {
 
             ibkrConnection.onConnect();
 
+            // Load today's execution history into the journal
+            ibkrConnection.reqExecutions(1);
+
             int marketDataType = MarketDataType.REALTIME;
             ibkrConnection.reqMarketDataType(marketDataType);
 

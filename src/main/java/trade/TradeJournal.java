@@ -12,6 +12,15 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * Thread-safe in-memory trade journal.
  * Captures fills and IBKR-computed realized P&L by correlating openOrder,
  * execDetails, and commissionAndFeesReport callbacks.
+ *
+ * Supports both real-time fills (current session) and historical fills
+ * replayed via reqExecutions(). Deduplicates by execId so reconnects
+ * don't double-count.
+ *
+ * Strategy resolution priority:
+ *   1. execution.orderRef() — present for all fills (historical + live)
+ *   2. orderMetaMap[orderId] — populated from openOrder() for open orders
+ *   3. "Unknown" fallback
  */
 public class TradeJournal {
     private static final Logger log = LoggerFactory.getLogger(TradeJournal.class);
@@ -21,7 +30,8 @@ public class TradeJournal {
     public record OrderMeta(String strategy, String symbol) {}
 
     private record PendingExecution(
-        String execId, int orderId, String side, double shares, double price, LocalDateTime time
+        String execId, int orderId, String orderRef, String symbol,
+        String side, double shares, double price, LocalDateTime time
     ) {}
 
     private record CommissionData(double commission, double realizedPnL) {}
@@ -36,7 +46,7 @@ public class TradeJournal {
 
     // --- State ---
 
-    /** orderId → {strategy, symbol} — populated by openOrder() */
+    /** orderId → {strategy, symbol} — populated by openOrder() for currently open orders */
     private final Map<Integer, OrderMeta> orderMetaMap = new ConcurrentHashMap<>();
 
     /** execId → execution waiting for commission report */
@@ -45,8 +55,11 @@ public class TradeJournal {
     /** execId → commission report waiting for execution (handles race where commission arrives first) */
     private final Map<String, CommissionData> pendingCommissionMap = new ConcurrentHashMap<>();
 
-    /** Finalized trade records */
+    /** Finalized trade records, ordered by arrival */
     private final List<TradeRecord> completedTrades = new CopyOnWriteArrayList<>();
+
+    /** Tracks already-processed execIds to prevent duplicates on reconnect / reqExecutions replay */
+    private final Set<String> processedExecIds = ConcurrentHashMap.newKeySet();
 
     // --- Public API ---
 
@@ -57,9 +70,20 @@ public class TradeJournal {
         log.debug("TradeJournal: registered orderId={} strategy='{}' symbol='{}'", orderId, strategy, symbol);
     }
 
-    /** Called from execDetails() when a fill arrives. */
-    public void recordExecution(String execId, int orderId, String side, double shares, double price, LocalDateTime time) {
-        PendingExecution exec = new PendingExecution(execId, orderId, side, shares, price, time);
+    /**
+     * Called from execDetails() when a fill arrives (real-time or historical replay).
+     *
+     * @param orderRef  execution.orderRef() — strategy name set on the order; may be blank for manual orders
+     * @param symbol    contract.symbol() from the execDetails callback
+     */
+    public void recordExecution(String execId, int orderId, String orderRef, String symbol,
+                                String side, double shares, double price, LocalDateTime time) {
+        if (processedExecIds.contains(execId)) {
+            log.debug("TradeJournal: skipping duplicate execId={}", execId);
+            return;
+        }
+
+        PendingExecution exec = new PendingExecution(execId, orderId, orderRef, symbol, side, shares, price, time);
 
         // Check if commission report already arrived for this execId
         CommissionData commission = pendingCommissionMap.remove(execId);
@@ -68,11 +92,17 @@ public class TradeJournal {
         } else {
             pendingExecMap.put(execId, exec);
         }
-        log.debug("TradeJournal: recorded execution execId={} orderId={} side={} shares={} price={}", execId, orderId, side, shares, price);
+        log.debug("TradeJournal: recorded execution execId={} orderId={} orderRef='{}' symbol={} side={} shares={} price={}",
+                execId, orderId, orderRef, symbol, side, shares, price);
     }
 
     /** Called from commissionAndFeesReport(). Triggers trade completion when the matching execution exists. */
     public void recordCommission(String execId, double commission, double realizedPnL) {
+        if (processedExecIds.contains(execId)) {
+            log.debug("TradeJournal: skipping duplicate commission for execId={}", execId);
+            return;
+        }
+
         CommissionData commData = new CommissionData(commission, realizedPnL);
 
         // Check if execution already arrived for this execId
@@ -112,14 +142,29 @@ public class TradeJournal {
     // --- Private helpers ---
 
     private void finalizeTrade(PendingExecution exec, CommissionData commData) {
+        // Mark as processed before adding to list to prevent any race on duplicate callbacks
+        if (!processedExecIds.add(exec.execId())) {
+            log.debug("TradeJournal: duplicate finalize for execId={}, ignoring", exec.execId());
+            return;
+        }
+
         // IBKR sets realizedPnL = Double.MAX_VALUE for opening fills
         boolean isClosing = commData.realizedPnL() < Double.MAX_VALUE / 2;
         double realizedPnL = isClosing ? commData.realizedPnL() : 0.0;
         double netPnL = isClosing ? realizedPnL - commData.commission() : 0.0;
 
-        OrderMeta meta = orderMetaMap.get(exec.orderId());
-        String strategy = meta != null ? meta.strategy() : "Unknown";
-        String symbol = meta != null ? meta.symbol() : "Unknown";
+        // Strategy resolution: orderRef (from execution) > orderId meta lookup > "Unknown"
+        String strategy;
+        String symbol;
+        if (exec.orderRef() != null && !exec.orderRef().isBlank()) {
+            strategy = exec.orderRef();
+            symbol = exec.symbol() != null && !exec.symbol().isBlank() ? exec.symbol() : resolveSymbol(exec.orderId());
+        } else {
+            OrderMeta meta = orderMetaMap.get(exec.orderId());
+            strategy = meta != null ? meta.strategy() : "Unknown";
+            symbol = exec.symbol() != null && !exec.symbol().isBlank() ? exec.symbol() :
+                     meta != null ? meta.symbol() : "Unknown";
+        }
 
         TradeRecord record = TradeRecord.builder()
                 .execId(exec.execId())
@@ -138,5 +183,10 @@ public class TradeJournal {
         completedTrades.add(record);
         log.info("TradeJournal: finalized trade execId={} symbol={} strategy='{}' side={} closing={} netPnL={}",
                 exec.execId(), symbol, strategy, exec.side(), isClosing, netPnL);
+    }
+
+    private String resolveSymbol(int orderId) {
+        OrderMeta meta = orderMetaMap.get(orderId);
+        return meta != null ? meta.symbol() : "Unknown";
     }
 }

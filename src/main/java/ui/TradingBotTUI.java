@@ -306,7 +306,7 @@ public class TradingBotTUI {
     }
 
     private void showPnL() {
-        BasicWindow pnlWindow = new BasicWindow("P&L Report (Session)");
+        BasicWindow pnlWindow = new BasicWindow("P&L Report (Today)");
         pnlWindow.setHints(List.of(Window.Hint.CENTERED));
 
         Panel mainPanel = new Panel(new LinearLayout(Direction.VERTICAL));

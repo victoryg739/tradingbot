@@ -512,6 +512,19 @@ public class IBKRConnection {
         eWrapper.setTradeJournal(j);
     }
 
+    /**
+     * Requests execution history for the last N calendar days.
+     * Fires execDetails() + commissionAndFeesReport() callbacks for each fill,
+     * which automatically populate the TradeJournal.
+     */
+    public void reqExecutions(int lastNDays) {
+        ExecutionFilter filter = new ExecutionFilter();
+        filter.lastNDays(lastNDays);
+        int reqId = 1; // fixed reqId for execution history requests
+        log.info("Requesting execution history (last {} day(s))...", lastNDays);
+        client.reqExecutions(reqId, filter);
+    }
+
     public void closeAllOrders() {
         log.warn("Cancelling ALL open orders via global cancel");
         client.reqGlobalCancel(new OrderCancel());

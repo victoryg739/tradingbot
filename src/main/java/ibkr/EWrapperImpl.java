@@ -262,6 +262,8 @@ public class EWrapperImpl implements EWrapper {
             tradeJournal.recordExecution(
                     execution.execId(),
                     execution.orderId(),
+                    execution.orderRef(),
+                    contract.symbol(),
                     execution.side(),
                     execution.shares().value().doubleValue(),
                     execution.price(),
