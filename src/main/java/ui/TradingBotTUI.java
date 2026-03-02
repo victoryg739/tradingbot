@@ -30,6 +30,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import java.util.concurrent.CompletableFuture;
 
 public class TradingBotTUI {
     private static final Logger log = LoggerFactory.getLogger(TradingBotTUI.class);
@@ -355,21 +356,37 @@ public class TradingBotTUI {
         if (si >= 0) strategyCombo.setSelectedIndex(si);
         filterRow.addComponent(strategyCombo);
 
-        filterRow.addComponent(new Button("  Load  ", () -> {
+        // Single Refresh button: fetches from IBKR, waits for completion, then reopens
+        filterRow.addComponent(new Button("  Refresh  ", () -> {
             int idx = Math.max(0, periodCombo.getSelectedIndex());
             int days = PERIOD_DAYS[idx];
+            String strategy = strategyCombo.getSelectedItem() != null
+                    ? strategyCombo.getSelectedItem() : ALL_STRATEGIES;
             win.close();
-            ibkrConnection.reqExecutions(days);
-            MessageDialog.showMessageDialog(gui, "Loading",
-                    "Requesting " + PERIOD_LABELS[idx] + " of execution history from IBKR.\n\n" +
-                    "Reopen P&L in a few seconds — data arrives asynchronously.");
-            showPnLDialog(strategyCombo.getSelectedItem() != null ? strategyCombo.getSelectedItem() : ALL_STRATEGIES, days);
-        }));
 
-        filterRow.addComponent(new Button("  Apply  ", () -> {
-            String sel = strategyCombo.getSelectedItem();
-            win.close();
-            showPnLDialog(sel != null ? sel : ALL_STRATEGIES, loadedDays);
+            // Show a non-blocking loading window while IBKR data arrives
+            BasicWindow loadingWin = new BasicWindow("Loading");
+            loadingWin.setHints(List.of(Window.Hint.CENTERED));
+            Panel loadingPanel = new Panel(new LinearLayout(Direction.VERTICAL));
+            loadingPanel.addComponent(new Label(
+                    "  Fetching " + PERIOD_LABELS[idx] + " of history from IBKR...  "));
+            loadingPanel.addComponent(new EmptySpace());
+            loadingPanel.addComponent(new Label("  Please wait.  "));
+            loadingWin.setComponent(loadingPanel);
+            gui.addWindow(loadingWin);
+
+            CompletableFuture<Void> future = ibkrConnection.reqExecutions(days);
+            new Thread(() -> {
+                try {
+                    future.get(10, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    log.warn("reqExecutions wait timed out or failed: {}", e.getMessage());
+                }
+                gui.getGUIThread().invokeLater(() -> {
+                    loadingWin.close();
+                    showPnLDialog(strategy, days);
+                });
+            }, "PnL-Refresh").start();
         }));
 
         mainPanel.addComponent(filterRow.withBorder(Borders.singleLine("Filters")));
