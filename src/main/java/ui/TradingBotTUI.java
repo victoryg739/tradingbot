@@ -24,13 +24,14 @@ import trade.TradeJournal;
 import trade.TradeRecord;
 
 import java.io.IOException;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
-import java.util.concurrent.CompletableFuture;
 
 public class TradingBotTUI {
     private static final Logger log = LoggerFactory.getLogger(TradingBotTUI.class);
@@ -324,8 +325,14 @@ public class TradingBotTUI {
         strategyOptions.add(ALL_STRATEGIES);
         allTrades.stream().map(TradeRecord::getStrategy).distinct().sorted().forEach(strategyOptions::add);
 
-        // Filter
+        // Date cutoff: "Today" = since midnight; other periods = last N×24h
+        LocalDateTime dateCutoff = (loadedDays == 1)
+                ? LocalDate.now().atStartOfDay()
+                : LocalDateTime.now().minusDays(loadedDays);
+
+        // Filter by date AND strategy
         List<TradeRecord> filtered = allTrades.stream()
+                .filter(t -> t.getTime() != null && !t.getTime().isBefore(dateCutoff))
                 .filter(t -> ALL_STRATEGIES.equals(strategyFilter) || t.getStrategy().equals(strategyFilter))
                 .collect(Collectors.toList());
 
@@ -356,37 +363,23 @@ public class TradingBotTUI {
         if (si >= 0) strategyCombo.setSelectedIndex(si);
         filterRow.addComponent(strategyCombo);
 
-        // Single Refresh button: fetches from IBKR, waits for completion, then reopens
-        filterRow.addComponent(new Button("  Refresh  ", () -> {
+        filterRow.addComponent(new Button("  Load  ", () -> {
             int idx = Math.max(0, periodCombo.getSelectedIndex());
             int days = PERIOD_DAYS[idx];
-            String strategy = strategyCombo.getSelectedItem() != null
-                    ? strategyCombo.getSelectedItem() : ALL_STRATEGIES;
+            String sel = strategyCombo.getSelectedItem() != null ? strategyCombo.getSelectedItem() : ALL_STRATEGIES;
+            lastLoadedDays = days;
+            lastStrategyFilter = sel;
             win.close();
+            ibkrConnection.reqExecutions(days);
+            MessageDialog.showMessageDialog(gui, "Loading History",
+                    "Requesting " + PERIOD_LABELS[idx] + " of execution history from IBKR.\n\n" +
+                    "Data arrives asynchronously. Reopen P&L in a few seconds.");
+        }));
 
-            // Show a non-blocking loading window while IBKR data arrives
-            BasicWindow loadingWin = new BasicWindow("Loading");
-            loadingWin.setHints(List.of(Window.Hint.CENTERED));
-            Panel loadingPanel = new Panel(new LinearLayout(Direction.VERTICAL));
-            loadingPanel.addComponent(new Label(
-                    "  Fetching " + PERIOD_LABELS[idx] + " of history from IBKR...  "));
-            loadingPanel.addComponent(new EmptySpace());
-            loadingPanel.addComponent(new Label("  Please wait.  "));
-            loadingWin.setComponent(loadingPanel);
-            gui.addWindow(loadingWin);
-
-            CompletableFuture<Void> future = ibkrConnection.reqExecutions(days);
-            new Thread(() -> {
-                try {
-                    future.get(10, TimeUnit.SECONDS);
-                } catch (Exception e) {
-                    log.warn("reqExecutions wait timed out or failed: {}", e.getMessage());
-                }
-                gui.getGUIThread().invokeLater(() -> {
-                    loadingWin.close();
-                    showPnLDialog(strategy, days);
-                });
-            }, "PnL-Refresh").start();
+        filterRow.addComponent(new Button("  Apply  ", () -> {
+            String sel = strategyCombo.getSelectedItem();
+            win.close();
+            showPnLDialog(sel != null ? sel : ALL_STRATEGIES, loadedDays);
         }));
 
         mainPanel.addComponent(filterRow.withBorder(Borders.singleLine("Filters")));

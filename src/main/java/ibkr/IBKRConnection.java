@@ -10,8 +10,6 @@ import org.slf4j.LoggerFactory;
 import trade.TradeJournal;
 import util.Constants;
 
-import java.util.concurrent.CompletableFuture;
-
 import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -518,18 +516,13 @@ public class IBKRConnection {
      * Requests execution history for the last N calendar days.
      * Fires execDetails() + commissionAndFeesReport() callbacks for each fill,
      * which automatically populate the TradeJournal.
-     *
-     * @return a CompletableFuture that completes when execDetailsEnd() fires,
-     *         signalling that all fills for this request have been delivered.
      */
-    public CompletableFuture<Void> reqExecutions(int lastNDays) {
+    public void reqExecutions(int lastNDays) {
         ExecutionFilter filter = new ExecutionFilter();
         filter.lastNDays(lastNDays);
         int reqId = 1; // fixed reqId for execution history requests
         log.info("Requesting execution history (last {} day(s))...", lastNDays);
-        CompletableFuture<Void> future = eWrapper.registerExecDetailsFuture(reqId);
         client.reqExecutions(reqId, filter);
-        return future;
     }
 
     public void closeAllOrders() {

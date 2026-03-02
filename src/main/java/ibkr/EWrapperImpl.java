@@ -15,8 +15,6 @@ import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /*
@@ -38,9 +36,6 @@ public class EWrapperImpl implements EWrapper {
     private IBKRConnection ibkrConnection;
     private TradeJournal tradeJournal;
 
-    /** Tracks pending CompletableFutures waiting for execDetailsEnd, keyed by reqId. */
-    private final Map<Integer, CompletableFuture<Void>> execDetailsFutures = new ConcurrentHashMap<>();
-
     // Track market data type: 1=REALTIME, 2=FROZEN, 3=DELAYED, 4=DELAYED_FROZEN
     private volatile int currentMarketDataType = 1; // Default to real-time
 
@@ -61,13 +56,6 @@ public class EWrapperImpl implements EWrapper {
     //! [socket_init]
     public void setTradeJournal(TradeJournal j) {
         this.tradeJournal = j;
-    }
-
-    /** Registers a future that will be completed when execDetailsEnd fires for the given reqId. */
-    public CompletableFuture<Void> registerExecDetailsFuture(int reqId) {
-        CompletableFuture<Void> future = new CompletableFuture<>();
-        execDetailsFutures.put(reqId, future);
-        return future;
     }
 
     public EClientSocket getClient() {
@@ -287,10 +275,6 @@ public class EWrapperImpl implements EWrapper {
     @Override
     public void execDetailsEnd(int reqId) {
         log.debug("Execution details end: reqId={}", reqId);
-        CompletableFuture<Void> future = execDetailsFutures.remove(reqId);
-        if (future != null) {
-            future.complete(null);
-        }
     }
 
     @Override
