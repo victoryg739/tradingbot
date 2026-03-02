@@ -9,6 +9,7 @@ import risk.Position;
 import risk.RiskManager;
 import strategy.LowFloatMomentum;
 import strategy.StrategyRunner;
+import trade.TradeJournal;
 import ui.TradingBotTUI;
 
 import java.util.Arrays;
@@ -28,6 +29,9 @@ public class TradingBot {
 
         try {
             ibkrConnection = new IBKRConnection();
+            TradeJournal journal = new TradeJournal();
+            ibkrConnection.setTradeJournal(journal);
+
             Position position = new Position(ibkrConnection);
             RiskManager riskManager = new RiskManager();
 
@@ -68,7 +72,7 @@ public class TradingBot {
             } else {
                 // TUI mode - let user control via terminal UI
                 log.info("Launching Terminal UI...");
-                TradingBotTUI tui = new TradingBotTUI(ibkrConnection, strategyRunner);
+                TradingBotTUI tui = new TradingBotTUI(ibkrConnection, strategyRunner, journal);
                 tui.start();
             }
 

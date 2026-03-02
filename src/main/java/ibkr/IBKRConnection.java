@@ -7,6 +7,7 @@ import data.RequestTrackerManager;
 import ibkr.model.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import trade.TradeJournal;
 import util.Constants;
 
 import java.time.LocalTime;
@@ -505,6 +506,10 @@ public class IBKRConnection {
 
         log.debug("Received {} account summary entries", result.size());
         return result;
+    }
+
+    public void setTradeJournal(TradeJournal j) {
+        eWrapper.setTradeJournal(j);
     }
 
     public void closeAllOrders() {

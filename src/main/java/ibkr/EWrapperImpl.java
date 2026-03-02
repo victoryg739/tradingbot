@@ -7,8 +7,11 @@ import data.RequestTrackerManager;
 import ibkr.model.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import trade.TradeJournal;
 import util.Constants;
 
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -31,6 +34,7 @@ public class EWrapperImpl implements EWrapper {
 
     private RequestTrackerManager requestTrackerManager;
     private IBKRConnection ibkrConnection;
+    private TradeJournal tradeJournal;
 
     // Track market data type: 1=REALTIME, 2=FROZEN, 3=DELAYED, 4=DELAYED_FROZEN
     private volatile int currentMarketDataType = 1; // Default to real-time
@@ -50,6 +54,10 @@ public class EWrapperImpl implements EWrapper {
         this.ibkrConnection = ibkrConnection;
     }
     //! [socket_init]
+    public void setTradeJournal(TradeJournal j) {
+        this.tradeJournal = j;
+    }
+
     public EClientSocket getClient() {
         return clientSocket;
     }
@@ -172,7 +180,9 @@ public class EWrapperImpl implements EWrapper {
 
         orderOutputTracker.add(Constants.OPEN_ORDERS_REQ_ID, orderOutput);
 
-//        System.out.println(EWrapperMsgGenerator.openOrder(orderId, contract, order, orderState));
+        if (tradeJournal != null) {
+            tradeJournal.recordOrderMeta(orderId, order.orderRef(), contract.symbol());
+        }
     }
     //! [openorder]
 
@@ -235,10 +245,29 @@ public class EWrapperImpl implements EWrapper {
     }
     //! [contractdetailsend]
 
+    private static final DateTimeFormatter EXEC_TIME_FMT = DateTimeFormatter.ofPattern("yyyyMMdd  HH:mm:ss");
+
     @Override
     public void execDetails(int reqId, Contract contract, Execution execution) {
         orderLog.info("EXEC_DETAILS | reqId={} | symbol={} | side={} | shares={} | price={} | execId={}",
                 reqId, contract.symbol(), execution.side(), execution.shares(), execution.price(), execution.execId());
+
+        if (tradeJournal != null) {
+            LocalDateTime time;
+            try {
+                time = LocalDateTime.parse(execution.time(), EXEC_TIME_FMT);
+            } catch (Exception e) {
+                time = LocalDateTime.now();
+            }
+            tradeJournal.recordExecution(
+                    execution.execId(),
+                    execution.orderId(),
+                    execution.side(),
+                    execution.shares().value().doubleValue(),
+                    execution.price(),
+                    time
+            );
+        }
     }
 
     @Override
@@ -382,6 +411,14 @@ public class EWrapperImpl implements EWrapper {
     @Override
     public void commissionAndFeesReport(CommissionAndFeesReport commissionAndFeesReport) {
         orderLog.info("COMMISSION | {}", EWrapperMsgGenerator.commissionAndFeesReport(commissionAndFeesReport));
+
+        if (tradeJournal != null) {
+            tradeJournal.recordCommission(
+                    commissionAndFeesReport.execId(),
+                    commissionAndFeesReport.commissionAndFees(),
+                    commissionAndFeesReport.realizedPNL()
+            );
+        }
     }
 
     //! [position]
