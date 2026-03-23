@@ -102,6 +102,104 @@ public class Position {
     }
 
 
+    /**
+     * Bull Flag Breakout entry: BUY LIMIT at flagHigh + 3 ticks,
+     * stop at flagLow, target at 2.0× R:R.
+     *
+     * @param contract       the stock to trade
+     * @param breakoutBar    the current (breakout) bar — used for logging only
+     * @param flagHigh       highest high of the flag consolidation bars
+     * @param flagLow        lowest low of the flag consolidation bars
+     * @param historicalBars full bar history (used for ATR sanity reference)
+     * @param strategyName   written into orderRef for all three bracket legs
+     */
+    public void calculateEntryBullFlag(Contract contract, Bar breakoutBar,
+            double flagHigh, double flagLow, List<Bar> historicalBars, String strategyName)
+            throws ExecutionException, InterruptedException, TimeoutException {
+
+        String symbol = contract.symbol();
+        log.info("[{}] calculateEntryBullFlag called — flagHigh={}, flagLow={}, breakoutBar=[close={}, open={}, vwap={}]",
+                symbol, flagHigh, flagLow, breakoutBar.close(), breakoutBar.open(), breakoutBar.wap());
+
+        ContractDetails contractDetails = ibkrConnection.reqContractDetails(contract);
+        log.info("[{}] Contract minTick: {}", symbol, contractDetails.minTick());
+
+        List<AccountSummaryOutput> accountSummary = ibkrConnection.reqAccountSummary(
+                "NetLiquidation,AvailableFunds,BuyingPower,HighestSeverity");
+        double netLiquidation = AccountSummaryOutput.getValueWithTag(accountSummary, "NetLiquidation");
+        double availableFunds = AccountSummaryOutput.getValueWithTag(accountSummary, "AvailableFunds");
+        log.info("[{}] Account — netLiquidation={}, availableFunds={}", symbol, netLiquidation, availableFunds);
+
+        // Entry: just above flag high (round UP to next tick)
+        double entryPrice = roundToTick(flagHigh + Constants.STANDARD_TICK_SIZE * 3,
+                Constants.STANDARD_TICK_SIZE, false);
+
+        // Stop: flag low (round DOWN to protect the stop)
+        double stopLossPrice = roundToTick(flagLow, Constants.STANDARD_TICK_SIZE, true);
+
+        // Defensive guard: stop must be below entry
+        if (stopLossPrice >= entryPrice) {
+            log.warn("[{}] SKIP: flagLow ({}) >= entryPrice ({}) — invalid bracket", symbol, stopLossPrice, entryPrice);
+            return;
+        }
+
+        // Defensive guard: stop width
+        double riskWidth = (entryPrice - stopLossPrice) / entryPrice;
+        if (riskWidth > 0.03) {
+            log.warn("[{}] SKIP: risk too wide ({:.2f}%) — flagHigh={}, flagLow={}, entry={}, stop={}",
+                    symbol, String.format("%.2f", riskWidth * 100), flagHigh, flagLow, entryPrice, stopLossPrice);
+            return;
+        }
+
+        double riskAmount   = calculateRiskAmount(netLiquidation, Constants.RISK_PER_TRADE);
+        double positionSize = calculatePositionSize(entryPrice, stopLossPrice, riskAmount, true);
+
+        if (positionSize < 1) {
+            log.warn("[{}] SKIP: position size rounds to 0 (riskAmount={}, entry={}, stop={})",
+                    symbol, riskAmount, entryPrice, stopLossPrice);
+            return;
+        }
+
+        double takeProfitPrice = calculateTakeProfitPrice(entryPrice, stopLossPrice, 2.0,
+                Constants.STANDARD_TICK_SIZE, true);
+
+        orderLog.info("[{}] BullFlag ORDER — entry={}, stop={}, takeProfit={}, size={}, R:R=2.0, riskWidth={:.2f}%, strategy={}",
+                symbol, entryPrice, stopLossPrice, takeProfitPrice, positionSize,
+                String.format("%.2f", riskWidth * 100), strategyName);
+
+        // --- Parent BUY LIMIT ---
+        Order parentOrder = new Order();
+        parentOrder.action("BUY");
+        parentOrder.totalQuantity(Decimal.get(positionSize));
+        parentOrder.orderType("LMT");
+        parentOrder.lmtPrice(entryPrice);
+        parentOrder.transmit(false);
+        parentOrder.orderRef(strategyName);
+
+        // --- Take Profit SELL LIMIT ---
+        Order takeProfitOrder = new Order();
+        takeProfitOrder.action("SELL");
+        takeProfitOrder.totalQuantity(Decimal.get(positionSize));
+        takeProfitOrder.orderType("LMT");
+        takeProfitOrder.lmtPrice(takeProfitPrice);
+        takeProfitOrder.transmit(false);
+        takeProfitOrder.orderRef(strategyName);
+
+        // --- Stop Loss SELL STOP ---
+        Order stopLossOrder = new Order();
+        stopLossOrder.action("SELL");
+        stopLossOrder.totalQuantity(Decimal.get(positionSize));
+        stopLossOrder.orderType("STP");
+        stopLossOrder.auxPrice(stopLossPrice);
+        stopLossOrder.transmit(true);
+        stopLossOrder.orderRef(strategyName);
+
+        log.info("[{}] Placing bracket order — parent BUY LMT @ {}, TP SELL LMT @ {}, SL SELL STP @ {}, qty={}",
+                symbol, entryPrice, takeProfitPrice, stopLossPrice, positionSize);
+        ibkrConnection.placeBracketOrders(contract, parentOrder, takeProfitOrder, stopLossOrder);
+        log.info("[{}] Bracket order placed successfully", symbol);
+    }
+
     public double calculateRiskAmount(double netLiqudation, double riskPerTrade) {
         // Risk Amount = Net Liquidation  * Risk Per Trade(%)
         return netLiqudation * riskPerTrade;

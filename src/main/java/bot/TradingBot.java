@@ -7,13 +7,17 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import risk.Position;
 import risk.RiskManager;
+import strategy.BullFlagBreakout;
 import strategy.LowFloatMomentum;
 import strategy.StrategyRunner;
 import trade.TradeJournal;
 import ui.TradingBotTUI;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 
 public class TradingBot {
@@ -48,8 +52,21 @@ public class TradingBot {
             // Log critical trading environment info
             logTradingEnvironment(ibkrConnection, marketDataType);
 
-            strategyRunner.addStrategy(new LowFloatMomentum(ibkrConnection, position, riskManager));
-            log.info("Strategy registered: LowFloatMomentum");
+            Properties strategyCfg = loadStrategyConfig();
+
+            if (Boolean.parseBoolean(strategyCfg.getProperty("strategy.LowFloatMomentum", "false"))) {
+                strategyRunner.addStrategy(new LowFloatMomentum(ibkrConnection, position, riskManager));
+                log.info("Strategy registered: LowFloatMomentum");
+            } else {
+                log.info("Strategy DISABLED (strategies.properties): LowFloatMomentum");
+            }
+
+            if (Boolean.parseBoolean(strategyCfg.getProperty("strategy.BullFlagBreakout", "false"))) {
+                strategyRunner.addStrategy(new BullFlagBreakout(ibkrConnection, position, riskManager));
+                log.info("Strategy registered: BullFlagBreakout");
+            } else {
+                log.info("Strategy DISABLED (strategies.properties): BullFlagBreakout");
+            }
 
             // Add shutdown hook for graceful shutdown
             final IBKRConnection finalConnection = ibkrConnection;
@@ -87,6 +104,21 @@ public class TradingBot {
         } catch (Exception e) {
             log.error("Unexpected error: {}", e.getMessage(), e);
         }
+    }
+
+    private static Properties loadStrategyConfig() {
+        Properties props = new Properties();
+        try (InputStream is = TradingBot.class.getClassLoader().getResourceAsStream("strategies.properties")) {
+            if (is != null) {
+                props.load(is);
+                log.info("Loaded strategy config from strategies.properties");
+            } else {
+                log.warn("strategies.properties not found on classpath — all strategies disabled by default");
+            }
+        } catch (IOException e) {
+            log.warn("Failed to load strategies.properties: {} — all strategies disabled by default", e.getMessage());
+        }
+        return props;
     }
 
     private static void logTradingEnvironment(IBKRConnection ibkrConnection, int requestedMarketDataType) {

@@ -3,6 +3,7 @@ package strategy;
 import com.ib.client.*;
 import ibkr.IBKRConnection;
 import ibkr.model.*;
+import indicators.ATR;
 import risk.Position;
 import risk.RiskManager;
 import util.Constants;
@@ -29,13 +30,15 @@ public class LowFloatMomentum implements Strategy {
     Position position;
     RiskManager riskManager;
 
-    private final double vwapSlope = 0.01;
-    private final int lookBackPeriod = 10; // 10 candles back from current candle meaning first candle dont count current candle
+    private final double vwapSlope = 0.005;            // relaxed: 0.5% (was 0.01)
+    private final int lookBackPeriod = 10;              // 10 candles back from current candle meaning first candle dont count current candle
     //TODO: We need to make sure let say the time is 10:40 now does historical API print the 10:40 candle tick by tick or print the 10:39 candle only can check with subscription
 
-    private final double positiveTrendThreshold = 0.80;
-    private final double entryThreshold = 0.01; // 1 percent
-    private final double dojiThreshold = 0.05; // higher threshold percent means more candle qualify as doji
+    private final double positiveTrendThreshold = 0.70; // relaxed: 70% (was 0.80)
+    private final double dojiThreshold = 0.05;          // higher threshold percent means more candle qualify as doji
+    private final int flagLookback = 6;                 // 6-bar flag window
+    private final double maxRiskPercent = 0.03;         // 3% max stop width
+    private final double entryThreshold = 0.01;         // close must be within 1% above VWAP
 //    Contract contract = new Contract();
 
     private static final Logger log = LoggerFactory.getLogger(LowFloatMomentum.class);
@@ -53,7 +56,7 @@ public class LowFloatMomentum implements Strategy {
 
     @Override
     public String getName() {
-        return "LowFloatMomentumMain";
+        return "Low Float Bull Flag";
     }
 
     @Override
@@ -68,7 +71,7 @@ public class LowFloatMomentum implements Strategy {
 
     @Override
     public LocalTime getEndTime() {
-        return  LocalTime.of(12, 30);
+        return  LocalTime.of(11, 30);
     }
 
     @Override
