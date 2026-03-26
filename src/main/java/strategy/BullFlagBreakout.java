@@ -3,12 +3,11 @@ package strategy;
 import com.ib.client.*;
 import ibkr.IBKRConnection;
 import ibkr.model.*;
-import indicators.ATR;
 import risk.Position;
 import risk.RiskManager;
-import util.Constants;
 
 import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -19,21 +18,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Bull Flag Breakout Strategy (Warrior Trading style)
+ * Bull Flag Breakout Strategy (Ross Cameron / Warrior Trading style)
  *
- * After a gap-up morning spike, low float stocks consolidate in a tight range
- * (the "flag") before continuing higher. We detect that consolidation, then
- * enter when the current bar is at/breaking the flag high.
+ * Models the three structural phases explicitly via a state machine:
+ *   Pole  — a sharp, high-volume green candle (≥1.5× avg body, ≥2× avg vol)
+ *   Flag  — 2–3 low-volume red candles pulling back ≤50% of pole range
+ *   Break — green candle closing above the prior red's high AND above HOD
+ *           with volume ≥1.5× avg
  *
- * Entry conditions (in order):
- *   1. isTrend()              — VWAP slope ≥ 0.5%, ≥ 70% of last 10 bars above VWAP
- *   2. isFlagConsolidation()  — last 6 bars are tight (≤ 1.5×ATR), ≥ 50% above VWAP
- *   3. isFlagBreakout()       — current bar closes ≥ 99.5% of flag high, bullish, above VWAP, not doji
- *   4. Risk pre-check         — stop width (flagHigh+3ticks − flagLow) / flagHigh ≤ 3%
- *
- * Entry:  flagHigh + 3 ticks (BUY LIMIT)
- * Stop:   flagLow
- * Target: 2.0× R:R
+ * All averages are computed over a rolling 20-bar window for self-calibration.
  * Window: 9:30–11:30 AM ET
  */
 public class BullFlagBreakout implements Strategy {
@@ -45,27 +38,31 @@ public class BullFlagBreakout implements Strategy {
     private final Position position;
     private final RiskManager riskManager;
 
-    // Trend parameters
-    private final double vwapSlope = 0.005;             // VWAP must rise ≥ 0.5% over lookback
-    private final int lookBackPeriod = 10;              // bars used for trend check
-    private final double positiveTrendThreshold = 0.70; // ≥ 70% of lookback bars must close above VWAP
-
-    // Flag parameters
-    private final int flagLookback = 6;                 // bars that form the flag (excl. current)
-    private final double flagAtrMultiple = 1.5;         // flag range must be ≤ 1.5× ATR(10)
-    private final double flagVwapMinRatio = 0.50;       // ≥ 50% of flag bars must close above VWAP
-    private final double breakoutTolerance = 0.995;     // current bar close ≥ 99.5% of flag high
-
-    // Risk
-    private final double maxRiskPercent = 0.03;         // skip if stop width > 3%
-    private final double dojiThreshold = 0.05;          // body ≤ 5% of total range → doji
-    private final double riskRewardMultiple = 2.0;      // take profit at 2× risk
+    private static final int    ROLLING_WINDOW             = 10;
+    private static final int    ROLLING_MIN_BARS           = 5;   // minimum bars before averages are trusted
+    private static final double POLE_BODY_MULTIPLIER       = 1.5;  // pole bar body ≥ 1.5× avgBody
+    private static final double POLE_VOLUME_MULTIPLIER     = 2.0;  // pole bar vol  ≥ 2× avgVol
+    private static final double FLAG_DEPTH_RATIO           = 0.5;  // pullback ≤ 50% of pole range
+    private static final double BREAKOUT_VOLUME_MULTIPLIER = 1.5;  // breakout vol ≥ 1.5× avgVol
+    private static final int    FLAG_MAX_BARS              = 6;    // abandon flag after 6 bars with no breakout
 
     public BullFlagBreakout(IBKRConnection ibkrConnection, Position position, RiskManager riskManager) {
         this.ibkrConnection = ibkrConnection;
         this.position = position;
         this.riskManager = riskManager;
     }
+
+    // -------------------------------------------------------------------------
+    // State machine types
+    // -------------------------------------------------------------------------
+
+    private enum State { IDLE, POLE_FORMING, FLAG_FORMING }
+
+    private record FlagSetup(Bar breakoutBar, double poleTopHigh, double flagLow) {}
+
+    // -------------------------------------------------------------------------
+    // Strategy interface
+    // -------------------------------------------------------------------------
 
     @Override
     public String getName() {
@@ -135,67 +132,320 @@ public class BullFlagBreakout implements Strategy {
                 continue;
             }
 
-            // --- Condition 1: Trend ---
-            boolean trendValid = isTrend(historicalPrices);
-            if (!trendValid) {
-                log.info("[{}] SKIP: Trend condition not met (need VWAP slope ≥{}% and ≥{}% bars above VWAP)",
-                        symbol, vwapSlope * 100, positiveTrendThreshold * 100);
+            // --- State-machine setup detection ---
+            FlagSetup setup = findSetup(historicalPrices, symbol);
+            if (setup == null) {
+                log.info("[{}] SKIP: No bull flag setup found in {} bars", symbol, historicalPrices.size());
                 continue;
             }
-            log.debug("[{}] PASS: Trend condition met", symbol);
 
-            // --- Condition 2: Flag consolidation ---
-            boolean flagValid = isFlagConsolidation(historicalPrices);
-            if (!flagValid) {
-                log.info("[{}] SKIP: Flag consolidation not met (last {} bars must be tight ≤{}×ATR, ≥{}% above VWAP)",
-                        symbol, flagLookback, flagAtrMultiple, flagVwapMinRatio * 100);
+            // --- Freshness check: breakout must be the current bar ---
+            String lastBarTime = historicalPrices.getLast().time();
+            if (!setup.breakoutBar().time().equals(lastBarTime)) {
+                log.info("[{}] SKIP: Stale setup (breakout was at {}, current bar is {})",
+                        symbol, setup.breakoutBar().time(), lastBarTime);
                 continue;
             }
-            log.debug("[{}] PASS: Flag consolidation confirmed — flagHigh={}, flagLow={}",
-                    symbol, getFlagHigh(historicalPrices), getFlagLow(historicalPrices));
 
-            // --- Condition 3: Breakout on current bar ---
-            Bar currentBar = historicalPrices.getLast();
-            boolean breakoutValid = isFlagBreakout(currentBar, historicalPrices);
-            if (!breakoutValid) {
-                double flagHigh = getFlagHigh(historicalPrices);
-                double currentVwap = currentBar.wap().value().doubleValue();
-                log.info("[{}] SKIP: Breakout condition not met (close={}, flagHigh={}, vwap={}, open={})",
-                        symbol, currentBar.close(), flagHigh, currentVwap, currentBar.open());
-                continue;
-            }
-            log.debug("[{}] PASS: Breakout bar confirmed — close={}, open={}, vwap={}",
-                    symbol, currentBar.close(), currentBar.open(), currentBar.wap());
+            log.info("[{}] *** SETUP CONFIRMED *** poleTopHigh={}, flagLow={}, breakoutClose={}, breakoutTime={}",
+                     symbol, setup.poleTopHigh(), setup.flagLow(),
+                     setup.breakoutBar().close(), setup.breakoutBar().time());
 
-            // --- Condition 4: Risk pre-check ---
-            double flagHigh = getFlagHigh(historicalPrices);
-            double flagLow  = getFlagLow(historicalPrices);
-            double entryCandidate = flagHigh + Constants.STANDARD_TICK_SIZE * 3;
-            double stopWidth = (entryCandidate - flagLow) / entryCandidate;
-
-            if (stopWidth > maxRiskPercent) {
-                log.warn("[{}] SKIP: Risk too wide ({:.2f}% > {:.2f}%) — flagHigh={}, flagLow={}, entry={}",
-                        symbol,
-                        String.format("%.2f", stopWidth * 100),
-                        String.format("%.2f", maxRiskPercent * 100),
-                        flagHigh, flagLow, entryCandidate);
-                continue;
-            }
-            log.debug("[{}] PASS: Risk check OK ({:.2f}% stop width)", symbol,
-                    String.format("%.2f", stopWidth * 100));
-
-            // --- All conditions met — place order ---
-            log.info("[{}] *** ALL CONDITIONS MET *** Placing Bull Flag bracket order. " +
-                            "flagHigh={}, flagLow={}, entry={}, stopWidth={}%, vwap={}",
-                    symbol, flagHigh, flagLow,
-                    String.format("%.2f", entryCandidate),
-                    String.format("%.2f", stopWidth * 100),
-                    currentBar.wap());
-
-            position.calculateEntryBullFlag(contract, currentBar, flagHigh, flagLow, historicalPrices, getName());
+            position.calculateEntryBullFlag(contract, setup.breakoutBar(),
+                    setup.poleTopHigh(), setup.flagLow(), historicalPrices, getName());
         }
 
         log.debug("[BullFlagBreakout] Strategy cycle complete");
+    }
+
+    // -------------------------------------------------------------------------
+    // State machine
+    // -------------------------------------------------------------------------
+
+    /**
+     * Runs a Pole → Flag → Breakout state machine over {@code bars} in
+     * chronological order, skipping bars before 9:30 AM.
+     * Returns the <em>last</em> valid {@link FlagSetup} found, or {@code null}.
+     */
+    FlagSetup findSetup(List<Bar> bars, String symbol) {
+        // Pre-filter to market-hours bars only so rolling averages are never
+        // polluted by pre-market candles (tiny bodies, near-zero volume).
+        List<Bar> marketBars = new ArrayList<>();
+        for (Bar b : bars) {
+            if (!parseBarTime(b.time()).isBefore(LocalTime.of(9, 30))) {
+                marketBars.add(b);
+            }
+        }
+
+        State state = State.IDLE;
+        List<Bar> poleCandles = new ArrayList<>();
+        List<Bar> flagCandles = new ArrayList<>();
+        double poleTopHigh      = 0.0;
+        double poleRange        = 0.0;
+        double flagLow          = Double.MAX_VALUE;
+        double priorRedHigh     = 0.0;
+        int    flagBarsTotal    = 0;
+        // Frozen pre-pole baseline — used for all post-detection checks so that
+        // the pole's own large body/volume doesn't inflate the rolling average.
+        double baselineAvgBody  = 0.0;
+        double baselineAvgVol   = 0.0;
+        FlagSetup lastSetup     = null;
+
+        for (int i = 0; i < marketBars.size(); i++) {
+            Bar bar = marketBars.get(i);
+
+            double avgBody = avgBodySize(marketBars, i);
+            double avgVol  = avgVolume(marketBars, i);
+
+            if (avgBody == 0.0 || avgVol == 0.0) {
+                log.debug("[{}] SKIP bar {}: insufficient history for rolling averages", symbol, bar.time());
+                continue;
+            }
+
+            double body = Math.abs(bar.close() - bar.open());
+            double vol  = bar.volume().value().doubleValue();
+
+            switch (state) {
+                case IDLE -> {
+                    if (isGreen(bar)
+                            && body >= POLE_BODY_MULTIPLIER * avgBody
+                            && vol  >= POLE_VOLUME_MULTIPLIER * avgVol) {
+                        // Snapshot clean baseline before pole bars enter the rolling window
+                        baselineAvgBody = avgBody;
+                        baselineAvgVol  = avgVol;
+                        poleCandles = new ArrayList<>();
+                        poleCandles.add(bar);
+                        state = State.POLE_FORMING;
+                        log.info("[{}] PASS: Pole started at {} (body={}, baselineAvgBody={}, vol={}, baselineAvgVol={})",
+                                symbol, bar.time(),
+                                String.format("%.4f", body), String.format("%.4f", baselineAvgBody),
+                                String.format("%.0f", vol), String.format("%.0f", baselineAvgVol));
+                    } else {
+                        log.debug("[{}] IDLE bar {} does not qualify as pole start", symbol, bar.time());
+                    }
+                }
+
+                case POLE_FORMING -> {
+                    if (isGreen(bar)
+                            && body >= POLE_BODY_MULTIPLIER * baselineAvgBody
+                            && vol  >= POLE_VOLUME_MULTIPLIER * baselineAvgVol) {
+                        poleCandles.add(bar);
+                        if (poleCandles.size() > 4) {
+                            log.info("[{}] SKIP: Parabolic pole ({} big green candles) — resetting IDLE",
+                                    symbol, poleCandles.size());
+                            state = State.IDLE;
+                        }
+                    } else if (isRed(bar)) {
+                        // Pole complete — transition to flag
+                        poleTopHigh  = poleCandles.stream().mapToDouble(Bar::high).max().orElse(0.0);
+                        poleRange    = poleTopHigh - poleCandles.get(0).low();
+
+                        if (poleRange <= 0) {
+                            log.warn("[{}] SKIP: Pole range is zero — resetting IDLE", symbol);
+                            state = State.IDLE;
+                            break;
+                        }
+
+                        // Validate first flag bar
+                        double depth = poleTopHigh - bar.low();
+                        if (depth <= FLAG_DEPTH_RATIO * poleRange && vol < baselineAvgVol) {
+                            flagCandles  = new ArrayList<>();
+                            flagCandles.add(bar);
+                            flagLow      = bar.low();
+                            priorRedHigh = bar.high();
+                            flagBarsTotal = 1;
+                            state        = State.FLAG_FORMING;
+                            log.info("[{}] PASS: Pole complete (poleTopHigh={}, poleRange={}), flag started at {}",
+                                    symbol,
+                                    String.format("%.4f", poleTopHigh),
+                                    String.format("%.4f", poleRange),
+                                    bar.time());
+                        } else {
+                            log.info("[{}] SKIP: First flag bar failed validation " +
+                                     "(depth={}, maxDepth={}, vol={}, baselineAvgVol={}) — resetting IDLE",
+                                    symbol,
+                                    String.format("%.4f", depth),
+                                    String.format("%.4f", FLAG_DEPTH_RATIO * poleRange),
+                                    String.format("%.0f", vol),
+                                    String.format("%.0f", baselineAvgVol));
+                            state = State.IDLE;
+                        }
+                    } else {
+                        // Non-qualifying green
+                        log.info("[{}] SKIP: Non-qualifying green bar in POLE_FORMING — resetting IDLE", symbol);
+                        state = State.IDLE;
+                    }
+                }
+
+                case FLAG_FORMING -> {
+                    flagBarsTotal++;
+                    if (flagBarsTotal > FLAG_MAX_BARS) {
+                        log.info("[{}] SKIP: Flag expired ({} bars with no breakout) — resetting IDLE",
+                                symbol, flagBarsTotal - 1);
+                        state = State.IDLE;
+                        // Re-evaluate this bar as a potential new pole start rather than discarding it
+                        if (isGreen(bar) && body >= POLE_BODY_MULTIPLIER * avgBody && vol >= POLE_VOLUME_MULTIPLIER * avgVol) {
+                            log.info("[{}] PASS: Flag-expiry bar qualifies as new pole start at {}", symbol, bar.time());
+                            baselineAvgBody = avgBody;
+                            baselineAvgVol  = avgVol;
+                            poleCandles = new ArrayList<>();
+                            poleCandles.add(bar);
+                            state = State.POLE_FORMING;
+                        }
+                        break;
+                    }
+                    if (isRed(bar)) {
+                        if (flagCandles.size() >= 3) {
+                            log.info("[{}] SKIP: Too many red flag candles ({}) — resetting IDLE",
+                                    symbol, flagCandles.size());
+                            state = State.IDLE;
+                            break;
+                        }
+                        double depth = poleTopHigh - bar.low();
+                        if (depth > FLAG_DEPTH_RATIO * poleRange) {
+                            log.info("[{}] SKIP: Flag pulled back too deep " +
+                                     "(depth={} > maxDepth={}) — resetting IDLE",
+                                    symbol,
+                                    String.format("%.4f", depth),
+                                    String.format("%.4f", FLAG_DEPTH_RATIO * poleRange));
+                            state = State.IDLE;
+                            break;
+                        }
+                        if (vol >= baselineAvgVol) {
+                            log.info("[{}] SKIP: Heavy selling in flag (vol={} >= baselineAvgVol={}) — resetting IDLE",
+                                    symbol,
+                                    String.format("%.0f", vol),
+                                    String.format("%.0f", baselineAvgVol));
+                            state = State.IDLE;
+                            break;
+                        }
+                        flagCandles.add(bar);
+                        flagLow      = Math.min(flagLow, bar.low());
+                        priorRedHigh = bar.high();
+                        log.info("[{}] PASS: Flag candle added (total={}, flagLow={}, priorRedHigh={})",
+                                symbol, flagCandles.size(),
+                                String.format("%.4f", flagLow),
+                                String.format("%.4f", priorRedHigh));
+
+                    } else {
+                        // Green bar — potential breakout
+                        if (flagCandles.size() < 2) {
+                            log.info("[{}] SKIP: Not enough red flag candles ({} < 2) — resetting IDLE",
+                                    symbol, flagCandles.size());
+                            state = State.IDLE;
+                            break;
+                        }
+                        boolean breaksPriorRed  = bar.close() > priorRedHigh;
+                        boolean breaksHOD       = bar.close() > poleTopHigh;
+                        boolean volumeSpike     = vol >= BREAKOUT_VOLUME_MULTIPLIER * baselineAvgVol;
+
+                        if (breaksPriorRed && breaksHOD && volumeSpike) {
+                            lastSetup = new FlagSetup(bar, poleTopHigh, flagLow);
+                            log.info("[{}] PASS: Breakout bar confirmed at {} " +
+                                     "(close={}, priorRedHigh={}, poleTopHigh={}, vol={}, baselineAvgVol={})",
+                                    symbol, bar.time(),
+                                    String.format("%.4f", bar.close()),
+                                    String.format("%.4f", priorRedHigh),
+                                    String.format("%.4f", poleTopHigh),
+                                    String.format("%.0f", vol),
+                                    String.format("%.0f", baselineAvgVol));
+                            state = State.IDLE; // reset and continue — last setup wins
+                        } else {
+                            if (!breaksPriorRed) {
+                                log.info("[{}] Breakout condition FAILED: close ({}) <= priorRedHigh ({})",
+                                        symbol,
+                                        String.format("%.4f", bar.close()),
+                                        String.format("%.4f", priorRedHigh));
+                            }
+                            if (!breaksHOD) {
+                                log.info("[{}] Breakout condition FAILED: close ({}) <= poleTopHigh ({})",
+                                        symbol,
+                                        String.format("%.4f", bar.close()),
+                                        String.format("%.4f", poleTopHigh));
+                            }
+                            if (!volumeSpike) {
+                                log.info("[{}] Breakout condition FAILED: vol ({}) < {}× baselineAvgVol ({})",
+                                        symbol,
+                                        String.format("%.0f", vol),
+                                        BREAKOUT_VOLUME_MULTIPLIER,
+                                        String.format("%.0f", baselineAvgVol));
+                            }
+                            // Check if this failed-breakout green qualifies as a new pole start
+                            if (body >= POLE_BODY_MULTIPLIER * avgBody && vol >= POLE_VOLUME_MULTIPLIER * avgVol) {
+                                log.info("[{}] PASS: Failed breakout green qualifies as new pole start at {} — switching to POLE_FORMING",
+                                        symbol, bar.time());
+                                baselineAvgBody = avgBody;
+                                baselineAvgVol  = avgVol;
+                                poleCandles = new ArrayList<>();
+                                poleCandles.add(bar);
+                                flagBarsTotal = 0;
+                                state = State.POLE_FORMING;
+                            }
+                            // else stay in FLAG_FORMING
+                        }
+                    }
+                }
+            }
+        }
+
+        return lastSetup;
+    }
+
+    // -------------------------------------------------------------------------
+    // Rolling-average helpers
+    // -------------------------------------------------------------------------
+
+    private boolean isGreen(Bar bar) {
+        return bar.close() > bar.open();
+    }
+
+    private boolean isRed(Bar bar) {
+        return bar.close() <= bar.open();
+    }
+
+    /**
+     * Mean body size over the last {@code ROLLING_WINDOW} bars ending at {@code endExclusive}.
+     * Returns 0.0 if fewer than {@code ROLLING_MIN_BARS} bars are available (not yet trusted).
+     * Only pass market-hours bar lists — pre-market bars must be excluded by the caller.
+     */
+    private double avgBodySize(List<Bar> bars, int endExclusive) {
+        int from = Math.max(0, endExclusive - ROLLING_WINDOW);
+        if (endExclusive - from < ROLLING_MIN_BARS) return 0.0;
+        double sum = 0.0;
+        for (int i = from; i < endExclusive; i++) {
+            Bar b = bars.get(i);
+            sum += Math.abs(b.close() - b.open());
+        }
+        return sum / (endExclusive - from);
+    }
+
+    /**
+     * Mean volume over the last {@code ROLLING_WINDOW} bars ending at {@code endExclusive}.
+     * Returns 0.0 if fewer than {@code ROLLING_MIN_BARS} bars are available (not yet trusted).
+     * Only pass market-hours bar lists — pre-market bars must be excluded by the caller.
+     */
+    private double avgVolume(List<Bar> bars, int endExclusive) {
+        int from = Math.max(0, endExclusive - ROLLING_WINDOW);
+        if (endExclusive - from < ROLLING_MIN_BARS) return 0.0;
+        double sum = 0.0;
+        for (int i = from; i < endExclusive; i++) {
+            sum += bars.get(i).volume().value().doubleValue();
+        }
+        return sum / (endExclusive - from);
+    }
+
+    /**
+     * Parses the time component from an IBKR bar timestamp {@code "yyyyMMdd  HH:mm:ss"}.
+     * Returns {@link LocalTime#MIN} and logs a warning on failure.
+     */
+    private LocalTime parseBarTime(String timestamp) {
+        try {
+            String[] tokens = timestamp.trim().split("\\s+");
+            return LocalTime.parse(tokens[1], DateTimeFormatter.ofPattern("HH:mm:ss"));
+        } catch (Exception e) {
+            log.warn("[BullFlagBreakout] Failed to parse bar timestamp '{}': {}", timestamp, e.getMessage());
+            return LocalTime.MIN;
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -261,167 +511,8 @@ public class BullFlagBreakout implements Strategy {
     }
 
     // -------------------------------------------------------------------------
-    // Strategy conditions
+    // End-of-day cleanup
     // -------------------------------------------------------------------------
-
-    /**
-     * Condition 1 — Uptrend: VWAP rising ≥ 0.5% over last 10 bars,
-     * and ≥ 70% of those bars close above VWAP.
-     */
-    boolean isTrend(List<Bar> historicalData) {
-        if (historicalData.size() <= lookBackPeriod) {
-            log.debug("[isTrend] Insufficient bars: {} ≤ {}", historicalData.size(), lookBackPeriod);
-            return false;
-        }
-
-        int lookBackIndex = historicalData.size() - lookBackPeriod - 1;
-        double currVwap = historicalData.getLast().wap().value().doubleValue();
-        double pastVwap = historicalData.get(lookBackIndex).wap().value().doubleValue();
-
-        if (pastVwap <= 0) {
-            log.debug("[isTrend] Past VWAP is zero — skipping");
-            return false;
-        }
-
-        double slope = (currVwap - pastVwap) / pastVwap;
-        if (slope < vwapSlope) {
-            log.debug("[isTrend] VWAP slope too low: {:.3f}% < {:.3f}%",
-                    String.format("%.3f", slope * 100), String.format("%.3f", vwapSlope * 100));
-            return false;
-        }
-
-        int barsAboveVwap = 0;
-        for (int i = historicalData.size() - 1; i >= historicalData.size() - lookBackPeriod; i--) {
-            Bar b = historicalData.get(i);
-            if (b.close() > b.wap().value().doubleValue()) barsAboveVwap++;
-        }
-
-        double ratio = (double) barsAboveVwap / lookBackPeriod;
-        if (ratio < positiveTrendThreshold) {
-            log.debug("[isTrend] Too few bars above VWAP: {:.1f}% < {:.1f}%",
-                    String.format("%.1f", ratio * 100), String.format("%.1f", positiveTrendThreshold * 100));
-            return false;
-        }
-
-        log.debug("[isTrend] OK — slope={:.3f}%, barsAboveVwap={}/{}",
-                String.format("%.3f", slope * 100), barsAboveVwap, lookBackPeriod);
-        return true;
-    }
-
-    /**
-     * Condition 2 — Flag consolidation: the last {@code flagLookback} bars
-     * (excluding current) form a tight range ≤ 1.5×ATR(10) with ≥ 50% closing
-     * above VWAP.
-     */
-    boolean isFlagConsolidation(List<Bar> bars) {
-        int minRequired = lookBackPeriod + flagLookback + 1;
-        if (bars.size() < minRequired) {
-            log.debug("[isFlagConsolidation] Insufficient bars: {} < {}", bars.size(), minRequired);
-            return false;
-        }
-
-        double flagHigh = getFlagHigh(bars);
-        double flagLow  = getFlagLow(bars);
-        if (flagLow <= 0) {
-            log.debug("[isFlagConsolidation] flagLow is zero");
-            return false;
-        }
-
-        double atr = ATR.calculate(bars, 10);
-        double flagRange = flagHigh - flagLow;
-        if (flagRange > flagAtrMultiple * atr) {
-            log.debug("[isFlagConsolidation] Flag too wide: range={:.4f} > {}×ATR={:.4f}",
-                    String.format("%.4f", flagRange),
-                    flagAtrMultiple,
-                    String.format("%.4f", flagAtrMultiple * atr));
-            return false;
-        }
-
-        List<Bar> flagBars = bars.subList(bars.size() - flagLookback - 1, bars.size() - 1);
-        long barsAboveVwap = flagBars.stream()
-                .filter(b -> b.close() > b.wap().value().doubleValue())
-                .count();
-        double vwapRatio = (double) barsAboveVwap / flagLookback;
-        if (vwapRatio < flagVwapMinRatio) {
-            log.debug("[isFlagConsolidation] Not enough flag bars above VWAP: {:.1f}% < {:.1f}%",
-                    String.format("%.1f", vwapRatio * 100), String.format("%.1f", flagVwapMinRatio * 100));
-            return false;
-        }
-
-        log.debug("[isFlagConsolidation] OK — flagHigh={}, flagLow={}, range={:.4f}, ATR={:.4f}, vwapRatio={:.1f}%",
-                String.format("%.2f", flagHigh), String.format("%.2f", flagLow),
-                String.format("%.4f", flagRange), String.format("%.4f", atr),
-                String.format("%.1f", vwapRatio * 100));
-        return true;
-    }
-
-    /**
-     * Condition 3 — Breakout bar: current bar closes at/above flag high (within
-     * 0.5% tolerance), is bullish (close > open), above VWAP, and not a doji.
-     */
-    boolean isFlagBreakout(Bar currentBar, List<Bar> bars) {
-        double flagHigh = getFlagHigh(bars);
-        double currentVwap = currentBar.wap().value().doubleValue();
-
-        if (currentVwap <= 0) {
-            log.debug("[isFlagBreakout] VWAP is zero on current bar");
-            return false;
-        }
-
-        // Must close at/near flag high
-        if (currentBar.close() < flagHigh * breakoutTolerance) {
-            log.debug("[isFlagBreakout] Close {:.2f} below flagHigh×tolerance {:.2f}",
-                    String.format("%.2f", currentBar.close()),
-                    String.format("%.2f", flagHigh * breakoutTolerance));
-            return false;
-        }
-
-        // Must be a bullish bar
-        if (currentBar.close() <= currentBar.open()) {
-            log.debug("[isFlagBreakout] Not bullish: close={}, open={}", currentBar.close(), currentBar.open());
-            return false;
-        }
-
-        // Must close above VWAP
-        if (currentBar.close() <= currentVwap) {
-            log.debug("[isFlagBreakout] Close {:.2f} not above VWAP {:.2f}",
-                    String.format("%.2f", currentBar.close()), String.format("%.2f", currentVwap));
-            return false;
-        }
-
-        // Must not be a doji
-        if (dojiCandle(currentBar)) {
-            log.debug("[isFlagBreakout] Doji candle detected — skipping");
-            return false;
-        }
-
-        log.debug("[isFlagBreakout] OK — close={}, flagHigh={}, vwap={}, open={}",
-                currentBar.close(), flagHigh, currentVwap, currentBar.open());
-        return true;
-    }
-
-    // -------------------------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------------------------
-
-    /** Highest high of the last {@code flagLookback} bars (excluding current). */
-    private double getFlagHigh(List<Bar> bars) {
-        List<Bar> flagBars = bars.subList(bars.size() - flagLookback - 1, bars.size() - 1);
-        return flagBars.stream().mapToDouble(Bar::high).max().orElse(0.0);
-    }
-
-    /** Lowest low of the last {@code flagLookback} bars (excluding current). */
-    private double getFlagLow(List<Bar> bars) {
-        List<Bar> flagBars = bars.subList(bars.size() - flagLookback - 1, bars.size() - 1);
-        return flagBars.stream().mapToDouble(Bar::low).min().orElse(0.0);
-    }
-
-    /** Returns true when the bar body is ≤ dojiThreshold × total range. */
-    private boolean dojiCandle(Bar bar) {
-        double bodySize = Math.abs(bar.open() - bar.close());
-        double totalRange = bar.high() - bar.low();
-        return bodySize <= (totalRange * dojiThreshold);
-    }
 
     @Override
     public void onEndOfDay() {
