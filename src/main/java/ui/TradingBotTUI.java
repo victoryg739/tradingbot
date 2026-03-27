@@ -370,16 +370,10 @@ public class TradingBotTUI {
             lastLoadedDays = days;
             lastStrategyFilter = sel;
             win.close();
+            // Fire background refresh so any new fills since last session are picked up
             ibkrConnection.reqExecutions(days);
-            MessageDialog.showMessageDialog(gui, "Loading History",
-                    "Requesting " + PERIOD_LABELS[idx] + " of execution history from IBKR.\n\n" +
-                    "Data arrives asynchronously. Reopen P&L in a few seconds.");
-        }));
-
-        filterRow.addComponent(new Button("  Apply  ", () -> {
-            String sel = strategyCombo.getSelectedItem();
-            win.close();
-            showPnLDialog(sel != null ? sel : ALL_STRATEGIES, loadedDays);
+            // Show results immediately from in-memory journal (loaded from DB on startup)
+            showPnLDialog(sel, days);
         }));
 
         mainPanel.addComponent(filterRow.withBorder(Borders.singleLine("Filters")));
