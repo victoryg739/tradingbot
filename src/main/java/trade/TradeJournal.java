@@ -46,6 +46,9 @@ public class TradeJournal {
 
     // --- State ---
 
+    /** Optional SQLite persistence — set via setter, not constructor */
+    private TradeDatabase database;
+
     /** orderId → {strategy, symbol} — populated by openOrder() for currently open orders */
     private final Map<Integer, OrderMeta> orderMetaMap = new ConcurrentHashMap<>();
 
@@ -62,6 +65,31 @@ public class TradeJournal {
     private final Set<String> processedExecIds = ConcurrentHashMap.newKeySet();
 
     // --- Public API ---
+
+    public void setDatabase(TradeDatabase db) {
+        this.database = db;
+    }
+
+    /** Loads all trades from the database into memory. Call once on startup. */
+    public void loadFromDatabase() {
+        if (database == null) return;
+        List<TradeRecord> dbTrades = database.loadAll();
+        for (TradeRecord trade : dbTrades) {
+            if (processedExecIds.add(trade.getExecId())) {
+                completedTrades.add(trade);
+            }
+        }
+        log.info("TradeJournal: loaded {} trades from database ({} total in memory)",
+                dbTrades.size(), completedTrades.size());
+    }
+
+    public int getPendingExecCount() {
+        return pendingExecMap.size();
+    }
+
+    public int getPendingCommCount() {
+        return pendingCommissionMap.size();
+    }
 
     /** Called from openOrder() to register strategy/symbol for an order ID. */
     public void recordOrderMeta(int orderId, String strategy, String symbol) {
@@ -181,6 +209,9 @@ public class TradeJournal {
                 .build();
 
         completedTrades.add(record);
+        if (database != null) {
+            database.insertTrade(record);
+        }
         log.info("TradeJournal: finalized trade execId={} symbol={} strategy='{}' side={} closing={} netPnL={}",
                 exec.execId(), symbol, strategy, exec.side(), isClosing, netPnL);
     }

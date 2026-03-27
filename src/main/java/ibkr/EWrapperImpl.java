@@ -288,7 +288,13 @@ public class EWrapperImpl implements EWrapper {
 
     @Override
     public void execDetailsEnd(int reqId) {
-        log.debug("Execution details end: reqId={}", reqId);
+        if (tradeJournal != null) {
+            log.info("Execution history complete: reqId={}, pendingExec={}, pendingComm={}, completed={}",
+                    reqId, tradeJournal.getPendingExecCount(), tradeJournal.getPendingCommCount(),
+                    tradeJournal.getCompletedTrades().size());
+        } else {
+            log.info("Execution history complete: reqId={} (no trade journal)", reqId);
+        }
     }
 
     @Override

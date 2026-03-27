@@ -12,6 +12,7 @@ import risk.RiskManager;
 import strategy.BullFlagBreakout;
 import strategy.LowFloatMomentum;
 import strategy.StrategyRunner;
+import trade.TradeDatabase;
 import trade.TradeJournal;
 import ui.TradingBotTUI;
 
@@ -37,6 +38,10 @@ public class TradingBot {
         try {
             ibkrConnection = new IBKRConnection();
             TradeJournal journal = new TradeJournal();
+            TradeDatabase tradeDb = new TradeDatabase();
+            tradeDb.init("trades.db");
+            journal.setDatabase(tradeDb);
+            journal.loadFromDatabase();
             ibkrConnection.setTradeJournal(journal);
 
             MonitoringConfig monConfig = MonitoringConfig.load();
@@ -82,6 +87,7 @@ public class TradingBot {
             final IBKRConnection finalConnection = ibkrConnection;
             final StrategyRunner finalRunner = strategyRunner;
             final MonitoringServer finalMonitor = monitor;
+            final TradeDatabase finalTradeDb = tradeDb;
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 log.info("=== Trading Bot Shutting Down ===");
                 if (finalRunner != null) {
@@ -92,6 +98,9 @@ public class TradingBot {
                 }
                 if (finalMonitor != null) {
                     finalMonitor.stop();
+                }
+                if (finalTradeDb != null) {
+                    finalTradeDb.close();
                 }
                 log.info("=== Trading Bot Stopped ===");
             }));
