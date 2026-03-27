@@ -15,14 +15,17 @@ public class MonitoringConfig {
     public final String token;
     public final String telegramBotToken;
     public final String telegramChatId;
+    public final boolean telegramCommandsEnabled;
 
     private MonitoringConfig(boolean enabled, int port, String token,
-                             String telegramBotToken, String telegramChatId) {
+                             String telegramBotToken, String telegramChatId,
+                             boolean telegramCommandsEnabled) {
         this.enabled = enabled;
         this.port = port;
         this.token = token;
         this.telegramBotToken = telegramBotToken;
         this.telegramChatId = telegramChatId;
+        this.telegramCommandsEnabled = telegramCommandsEnabled;
     }
 
     public static MonitoringConfig load() {
@@ -44,7 +47,10 @@ public class MonitoringConfig {
         String token = props.getProperty("monitoring.http.token", "");
         String telegramBotToken = props.getProperty("monitoring.telegram.botToken", "");
         String telegramChatId = props.getProperty("monitoring.telegram.chatId", "");
+        boolean telegramCommandsEnabled = Boolean.parseBoolean(
+                props.getProperty("monitoring.telegram.commands.enabled", "false"));
 
-        return new MonitoringConfig(enabled, port, token, telegramBotToken, telegramChatId);
+        return new MonitoringConfig(enabled, port, token, telegramBotToken, telegramChatId,
+                telegramCommandsEnabled);
     }
 }

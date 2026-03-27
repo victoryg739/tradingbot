@@ -26,6 +26,8 @@ public class MonitoringServer {
     private final TelegramAlerter telegramAlerter;
 
     private HttpServer httpServer;
+    private TelegramCommandHandler commandHandler;
+    private Thread commandHandlerThread;
     private final long startTime = System.currentTimeMillis();
 
     private volatile int lastErrorCode = -1;
@@ -56,9 +58,24 @@ public class MonitoringServer {
         httpServer.setExecutor(Executors.newFixedThreadPool(4));
         httpServer.start();
         log.info("Monitoring HTTP server started on port {}", config.port);
+
+        if (config.telegramCommandsEnabled
+                && config.telegramBotToken != null && !config.telegramBotToken.isBlank()
+                && config.telegramChatId != null && !config.telegramChatId.isBlank()) {
+            commandHandler = new TelegramCommandHandler(
+                    config.telegramBotToken, config.telegramChatId,
+                    ibkrConnection, tradeJournal);
+            commandHandlerThread = new Thread(commandHandler, "Telegram-Commands");
+            commandHandlerThread.setDaemon(true);
+            commandHandlerThread.start();
+            log.info("Telegram command handler enabled");
+        }
     }
 
     public void stop() {
+        if (commandHandler != null) {
+            commandHandler.stop();
+        }
         if (httpServer != null) {
             httpServer.stop(2);
             log.info("Monitoring HTTP server stopped");
