@@ -1,10 +1,10 @@
 package ibkr;
 
-import bot.TradingBot;
 import com.ib.client.*;
 import data.RequestTracker;
 import data.RequestTrackerManager;
 import ibkr.model.*;
+import monitoring.MonitoringServer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import trade.TradeJournal;
@@ -34,6 +34,8 @@ public class IBKRConnection {
         RECONNECTING,    // Lost connection, attempting to reconnect
         FAILED          // Reconnection failed permanently
     }
+
+    private volatile MonitoringServer monitor;
 
     private volatile ConnectionState connectionState = ConnectionState.DISCONNECTED;
     private final AtomicBoolean isReconnecting = new AtomicBoolean(false);
@@ -188,6 +190,7 @@ public class IBKRConnection {
 
         log.warn("Connection loss detected, initiating reconnection sequence");
         connectionState = ConnectionState.RECONNECTING;
+        if (monitor != null) monitor.sendAlert("⚠️ Connection LOST to TWS/IB Gateway");
 
         // Start reconnection in separate thread (don't block callback)
         new Thread(this::attemptReconnection, "IBKR-Reconnect").start();
@@ -209,6 +212,7 @@ public class IBKRConnection {
         }
 
         log.info("IBKR reports connectivity restored (previous state: {}), performing clean reconnect...", connectionState);
+        if (monitor != null) monitor.sendAlert("✅ Connection RESTORED");
 
         // Cancel any pending requests with corrupted state
         requestTrackerManager.cancelAllPending("Connection restored - cleaning up stale requests");
@@ -281,6 +285,7 @@ public class IBKRConnection {
                     if (attempt >= MAX_RECONNECT_ATTEMPTS) {
                         log.error("Maximum reconnection attempts ({}) reached, giving up", MAX_RECONNECT_ATTEMPTS);
                         connectionState = ConnectionState.FAILED;
+                        if (monitor != null) monitor.sendAlert("🔴 Reconnection FAILED after 10 attempts");
                     }
                 }
             }
@@ -510,6 +515,11 @@ public class IBKRConnection {
 
     public void setTradeJournal(TradeJournal j) {
         eWrapper.setTradeJournal(j);
+    }
+
+    public void setMonitor(MonitoringServer monitor) {
+        this.monitor = monitor;
+        eWrapper.setMonitor(monitor);
     }
 
     /**

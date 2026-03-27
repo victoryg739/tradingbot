@@ -3,6 +3,8 @@ package bot;
 import com.ib.client.*;
 import ibkr.IBKRConnection;
 import ibkr.model.AccountSummaryOutput;
+import monitoring.MonitoringConfig;
+import monitoring.MonitoringServer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import risk.Position;
@@ -30,11 +32,17 @@ public class TradingBot {
 
         IBKRConnection ibkrConnection = null;
         StrategyRunner strategyRunner = null;
+        MonitoringServer monitor = null;
 
         try {
             ibkrConnection = new IBKRConnection();
             TradeJournal journal = new TradeJournal();
             ibkrConnection.setTradeJournal(journal);
+
+            MonitoringConfig monConfig = MonitoringConfig.load();
+            monitor = new MonitoringServer(monConfig, ibkrConnection, journal);
+            ibkrConnection.setMonitor(monitor);
+            monitor.start();
 
             Position position = new Position(ibkrConnection);
             RiskManager riskManager = new RiskManager();
@@ -50,7 +58,9 @@ public class TradingBot {
             ibkrConnection.reqMarketDataType(marketDataType);
 
             // Log critical trading environment info
-            logTradingEnvironment(ibkrConnection, marketDataType);
+            String tradingMode = logTradingEnvironment(ibkrConnection, marketDataType);
+            monitor.setTradingMode(tradingMode);
+            monitor.sendAlert("🤖 Trading bot started (" + tradingMode + " mode)");
 
             Properties strategyCfg = loadStrategyConfig();
 
@@ -71,6 +81,7 @@ public class TradingBot {
             // Add shutdown hook for graceful shutdown
             final IBKRConnection finalConnection = ibkrConnection;
             final StrategyRunner finalRunner = strategyRunner;
+            final MonitoringServer finalMonitor = monitor;
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 log.info("=== Trading Bot Shutting Down ===");
                 if (finalRunner != null) {
@@ -78,6 +89,9 @@ public class TradingBot {
                 }
                 if (finalConnection != null) {
                     finalConnection.onDisconnect();
+                }
+                if (finalMonitor != null) {
+                    finalMonitor.stop();
                 }
                 log.info("=== Trading Bot Stopped ===");
             }));
@@ -121,7 +135,7 @@ public class TradingBot {
         return props;
     }
 
-    private static void logTradingEnvironment(IBKRConnection ibkrConnection, int requestedMarketDataType) {
+    private static String logTradingEnvironment(IBKRConnection ibkrConnection, int requestedMarketDataType) {
         try {
             List<AccountSummaryOutput> accountSummary = ibkrConnection.reqAccountSummary("AccountType");
 
@@ -159,8 +173,10 @@ public class TradingBot {
                 log.warn(">>> MARKET DATA IS DELAYED - NOT REAL-TIME <<<");
             }
 
+            return tradingMode;
         } catch (Exception e) {
             log.warn("Could not determine trading environment: {}", e.getMessage());
+            return "UNKNOWN";
         }
     }
 }
