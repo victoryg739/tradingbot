@@ -21,10 +21,10 @@ import org.slf4j.LoggerFactory;
  * Bull Flag Breakout Strategy (Ross Cameron / Warrior Trading style)
  *
  * Models the three structural phases explicitly via a state machine:
- *   Pole  — a sharp, high-volume green candle (≥1.5× avg body, ≥2× avg vol)
- *   Flag  — 2–3 low-volume red candles pulling back ≤50% of pole range
- *   Break — green candle closing above the prior red's high AND above HOD
- *           with volume ≥1.5× avg
+ *   Pole  — a sharp, high-volume green candle (≥1.3× avg body, ≥1.5× avg vol)
+ *   Flag  — 1–3 low-volume red candles pulling back ≤50% of pole range
+ *   Break — green candle closing above the prior red's high AND pushing high above HOD
+ *           with volume ≥1.2× avg
  *
  * All averages are computed over a rolling 20-bar window for self-calibration.
  * Window: 9:30–11:30 AM ET
@@ -39,12 +39,13 @@ public class BullFlagBreakout implements Strategy {
     private final RiskManager riskManager;
 
     private static final int    ROLLING_WINDOW             = 10;
-    private static final int    ROLLING_MIN_BARS           = 5;   // minimum bars before averages are trusted
-    private static final double POLE_BODY_MULTIPLIER       = 1.5;  // pole bar body ≥ 1.5× avgBody
-    private static final double POLE_VOLUME_MULTIPLIER     = 2.0;  // pole bar vol  ≥ 2× avgVol
+    private static final int    ROLLING_MIN_BARS           = 5;    // minimum bars before averages are trusted
+    private static final double POLE_BODY_MULTIPLIER       = 1.3;  // pole bar body ≥ 1.3× avgBody
+    private static final double POLE_VOLUME_MULTIPLIER     = 1.5;  // pole bar vol  ≥ 1.5× avgVol
     private static final double FLAG_DEPTH_RATIO           = 0.5;  // pullback ≤ 50% of pole range
-    private static final double BREAKOUT_VOLUME_MULTIPLIER = 1.5;  // breakout vol ≥ 1.5× avgVol
-    private static final int    FLAG_MAX_BARS              = 6;    // abandon flag after 6 bars with no breakout
+    private static final double FLAG_VOLUME_MULTIPLIER     = 1.3;  // flag bar vol  < 1.3× baselineAvgVol (orderly pullback)
+    private static final double BREAKOUT_VOLUME_MULTIPLIER = 1.2;  // breakout vol ≥ 1.2× avgVol
+    private static final int    FLAG_MAX_BARS              = 8;    // abandon flag after 8 bars with no breakout
 
     public BullFlagBreakout(IBKRConnection ibkrConnection, Position position, RiskManager riskManager) {
         this.ibkrConnection = ibkrConnection;
@@ -238,7 +239,8 @@ public class BullFlagBreakout implements Strategy {
                     } else if (isRed(bar)) {
                         // Pole complete — transition to flag
                         poleTopHigh  = poleCandles.stream().mapToDouble(Bar::high).max().orElse(0.0);
-                        poleRange    = poleTopHigh - poleCandles.get(0).low();
+                        double poleBottomLow = poleCandles.stream().mapToDouble(Bar::low).min().orElse(poleCandles.getFirst().low());
+                        poleRange    = poleTopHigh - poleBottomLow;
 
                         if (poleRange <= 0) {
                             log.warn("[{}] SKIP: Pole range is zero — resetting IDLE", symbol);
@@ -248,7 +250,7 @@ public class BullFlagBreakout implements Strategy {
 
                         // Validate first flag bar
                         double depth = poleTopHigh - bar.low();
-                        if (depth <= FLAG_DEPTH_RATIO * poleRange && vol < baselineAvgVol) {
+                        if (depth <= FLAG_DEPTH_RATIO * poleRange && vol < FLAG_VOLUME_MULTIPLIER * baselineAvgVol) {
                             flagCandles  = new ArrayList<>();
                             flagCandles.add(bar);
                             flagLow      = bar.low();
@@ -271,9 +273,17 @@ public class BullFlagBreakout implements Strategy {
                             state = State.IDLE;
                         }
                     } else {
-                        // Non-qualifying green
+                        // Non-qualifying green — reset, but re-evaluate as potential new pole start
                         log.info("[{}] SKIP: Non-qualifying green bar in POLE_FORMING — resetting IDLE", symbol);
                         state = State.IDLE;
+                        if (isGreen(bar) && body >= POLE_BODY_MULTIPLIER * avgBody && vol >= POLE_VOLUME_MULTIPLIER * avgVol) {
+                            log.info("[{}] PASS: Non-qualifying green qualifies as new pole start at {} — switching to POLE_FORMING", symbol, bar.time());
+                            baselineAvgBody = avgBody;
+                            baselineAvgVol  = avgVol;
+                            poleCandles = new ArrayList<>();
+                            poleCandles.add(bar);
+                            state = State.POLE_FORMING;
+                        }
                     }
                 }
 
@@ -311,10 +321,11 @@ public class BullFlagBreakout implements Strategy {
                             state = State.IDLE;
                             break;
                         }
-                        if (vol >= baselineAvgVol) {
-                            log.info("[{}] SKIP: Heavy selling in flag (vol={} >= baselineAvgVol={}) — resetting IDLE",
+                        if (vol >= FLAG_VOLUME_MULTIPLIER * baselineAvgVol) {
+                            log.info("[{}] SKIP: Heavy selling in flag (vol={} >= {}× baselineAvgVol={}) — resetting IDLE",
                                     symbol,
                                     String.format("%.0f", vol),
+                                    FLAG_VOLUME_MULTIPLIER,
                                     String.format("%.0f", baselineAvgVol));
                             state = State.IDLE;
                             break;
@@ -329,14 +340,13 @@ public class BullFlagBreakout implements Strategy {
 
                     } else {
                         // Green bar — potential breakout
-                        if (flagCandles.size() < 2) {
-                            log.info("[{}] SKIP: Not enough red flag candles ({} < 2) — resetting IDLE",
-                                    symbol, flagCandles.size());
+                        if (flagCandles.isEmpty()) {
+                            log.info("[{}] SKIP: Not enough red flag candles (0 < 1) — resetting IDLE", symbol);
                             state = State.IDLE;
                             break;
                         }
                         boolean breaksPriorRed  = bar.close() > priorRedHigh;
-                        boolean breaksHOD       = bar.close() > poleTopHigh;
+                        boolean breaksHOD       = bar.high() > poleTopHigh;
                         boolean volumeSpike     = vol >= BREAKOUT_VOLUME_MULTIPLIER * baselineAvgVol;
 
                         if (breaksPriorRed && breaksHOD && volumeSpike) {
@@ -358,9 +368,9 @@ public class BullFlagBreakout implements Strategy {
                                         String.format("%.4f", priorRedHigh));
                             }
                             if (!breaksHOD) {
-                                log.info("[{}] Breakout condition FAILED: close ({}) <= poleTopHigh ({})",
+                                log.info("[{}] Breakout condition FAILED: high ({}) <= poleTopHigh ({})",
                                         symbol,
-                                        String.format("%.4f", bar.close()),
+                                        String.format("%.4f", bar.high()),
                                         String.format("%.4f", poleTopHigh));
                             }
                             if (!volumeSpike) {
