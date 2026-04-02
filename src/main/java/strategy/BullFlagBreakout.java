@@ -42,10 +42,12 @@ public class BullFlagBreakout implements Strategy {
     private static final int    ROLLING_MIN_BARS           = 5;    // minimum bars before averages are trusted
     private static final double POLE_BODY_MULTIPLIER       = 1.3;  // pole bar body ≥ 1.3× avgBody
     private static final double POLE_VOLUME_MULTIPLIER     = 1.5;  // pole bar vol  ≥ 1.5× avgVol
-    private static final double FLAG_DEPTH_RATIO           = 0.5;  // pullback ≤ 50% of pole range
+    private static final double FLAG_DEPTH_RATIO           = 0.65; // pullback ≤ 65% of pole range
     private static final double FLAG_VOLUME_MULTIPLIER     = 1.3;  // flag bar vol  < 1.3× baselineAvgVol (orderly pullback)
-    private static final double BREAKOUT_VOLUME_MULTIPLIER = 1.2;  // breakout vol ≥ 1.2× avgVol
+    private static final double BREAKOUT_VOLUME_MULTIPLIER = 1.0;  // breakout vol ≥ 1.0× avgVol (at or above baseline)
     private static final int    FLAG_MAX_BARS              = 8;    // abandon flag after 8 bars with no breakout
+    private static final int    FLAG_MAX_RED_BARS          = 4;    // max red candles in flag before reset (was hard-coded 3)
+    private static final int    POLE_MAX_NON_QUAL          = 2;    // max non-qualifying greens in POLE_FORMING before reset
 
     public BullFlagBreakout(IBKRConnection ibkrConnection, Position position, RiskManager riskManager) {
         this.ibkrConnection = ibkrConnection;
@@ -186,6 +188,7 @@ public class BullFlagBreakout implements Strategy {
         double flagLow          = Double.MAX_VALUE;
         double priorRedHigh     = 0.0;
         int    flagBarsTotal    = 0;
+        int    poleNonQualCount = 0;  // consecutive non-qualifying greens in POLE_FORMING
         // Frozen pre-pole baseline — used for all post-detection checks so that
         // the pole's own large body/volume doesn't inflate the rolling average.
         double baselineAvgBody  = 0.0;
@@ -230,13 +233,16 @@ public class BullFlagBreakout implements Strategy {
                     if (isGreen(bar)
                             && body >= POLE_BODY_MULTIPLIER * baselineAvgBody
                             && vol  >= POLE_VOLUME_MULTIPLIER * baselineAvgVol) {
+                        poleNonQualCount = 0;
                         poleCandles.add(bar);
                         if (poleCandles.size() > 4) {
                             log.info("[{}] SKIP: Parabolic pole ({} big green candles) — resetting IDLE",
                                     symbol, poleCandles.size());
                             state = State.IDLE;
+                            poleNonQualCount = 0;
                         }
                     } else if (isRed(bar)) {
+                        poleNonQualCount = 0;
                         // Pole complete — transition to flag
                         poleTopHigh  = poleCandles.stream().mapToDouble(Bar::high).max().orElse(0.0);
                         double poleBottomLow = poleCandles.stream().mapToDouble(Bar::low).min().orElse(poleCandles.getFirst().low());
@@ -273,16 +279,16 @@ public class BullFlagBreakout implements Strategy {
                             state = State.IDLE;
                         }
                     } else {
-                        // Non-qualifying green — reset, but re-evaluate as potential new pole start
-                        log.info("[{}] SKIP: Non-qualifying green bar in POLE_FORMING — resetting IDLE", symbol);
-                        state = State.IDLE;
-                        if (isGreen(bar) && body >= POLE_BODY_MULTIPLIER * avgBody && vol >= POLE_VOLUME_MULTIPLIER * avgVol) {
-                            log.info("[{}] PASS: Non-qualifying green qualifies as new pole start at {} — switching to POLE_FORMING", symbol, bar.time());
-                            baselineAvgBody = avgBody;
-                            baselineAvgVol  = avgVol;
-                            poleCandles = new ArrayList<>();
-                            poleCandles.add(bar);
-                            state = State.POLE_FORMING;
+                        // Non-qualifying green — allow up to POLE_MAX_NON_QUAL before resetting
+                        poleNonQualCount++;
+                        if (poleNonQualCount > POLE_MAX_NON_QUAL) {
+                            log.info("[{}] SKIP: Too many non-qualifying greens in POLE_FORMING ({}) — resetting IDLE",
+                                    symbol, poleNonQualCount);
+                            state = State.IDLE;
+                            poleNonQualCount = 0;
+                        } else {
+                            log.debug("[{}] Non-qualifying green in POLE_FORMING (count={}/{}) — staying in POLE_FORMING",
+                                    symbol, poleNonQualCount, POLE_MAX_NON_QUAL);
                         }
                     }
                 }
@@ -305,7 +311,7 @@ public class BullFlagBreakout implements Strategy {
                         break;
                     }
                     if (isRed(bar)) {
-                        if (flagCandles.size() >= 3) {
+                        if (flagCandles.size() >= FLAG_MAX_RED_BARS) {
                             log.info("[{}] SKIP: Too many red flag candles ({}) — resetting IDLE",
                                     symbol, flagCandles.size());
                             state = State.IDLE;
@@ -346,7 +352,7 @@ public class BullFlagBreakout implements Strategy {
                             break;
                         }
                         boolean breaksPriorRed  = bar.close() > priorRedHigh;
-                        boolean breaksHOD       = bar.high() > poleTopHigh;
+                        boolean breaksHOD       = bar.high() >= poleTopHigh * 0.99;
                         boolean volumeSpike     = vol >= BREAKOUT_VOLUME_MULTIPLIER * baselineAvgVol;
 
                         if (breaksPriorRed && breaksHOD && volumeSpike) {
