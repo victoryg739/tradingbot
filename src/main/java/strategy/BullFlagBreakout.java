@@ -480,9 +480,8 @@ public class BullFlagBreakout implements Strategy {
         scannerSubscription.belowPrice(20.0);
 
         List<TagValue> filterOptions = new ArrayList<>();
-        filterOptions.add(new TagValue("volumeVsAvgAbove", "3")); // 3× relative volume
 
-        log.debug("[BullFlagBreakout] Scanning with price=$1.50-$20, volumeVsAvgAbove=3");
+        log.debug("[BullFlagBreakout] Scanning with price=$1.50-$20, TOP_PERC_GAIN");
         return ibkrConnection.marketScan(scannerSubscription, filterOptions);
     }
 
