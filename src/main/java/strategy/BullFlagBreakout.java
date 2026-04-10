@@ -40,14 +40,14 @@ public class BullFlagBreakout implements Strategy {
 
     private static final int    ROLLING_WINDOW             = 10;
     private static final int    ROLLING_MIN_BARS           = 5;    // minimum bars before averages are trusted
-    private static final double POLE_BODY_MULTIPLIER       = 1.3;  // pole bar body ≥ 1.3× avgBody
-    private static final double POLE_VOLUME_MULTIPLIER     = 1.5;  // pole bar vol  ≥ 1.5× avgVol
-    private static final double FLAG_DEPTH_RATIO           = 0.65; // pullback ≤ 65% of pole range
+    private static final double POLE_BODY_MULTIPLIER       = 1.1;  // pole bar body ≥ 1.1× avgBody
+    private static final double POLE_VOLUME_MULTIPLIER     = 1.2;  // pole bar vol  ≥ 1.2× avgVol
+    private static final double FLAG_DEPTH_RATIO           = 0.70; // pullback ≤ 70% of pole range
     private static final double FLAG_VOLUME_MULTIPLIER     = 1.3;  // flag bar vol  < 1.3× baselineAvgVol (orderly pullback)
     private static final double BREAKOUT_VOLUME_MULTIPLIER = 1.0;  // breakout vol ≥ 1.0× avgVol (at or above baseline)
     private static final int    FLAG_MAX_BARS              = 8;    // abandon flag after 8 bars with no breakout
-    private static final int    FLAG_MAX_RED_BARS          = 4;    // max red candles in flag before reset (was hard-coded 3)
-    private static final int    POLE_MAX_NON_QUAL          = 2;    // max non-qualifying greens in POLE_FORMING before reset
+    private static final int    FLAG_MAX_RED_BARS          = 5;    // max red candles in flag before reset
+    private static final int    POLE_MAX_NON_QUAL          = 3;    // max non-qualifying greens in POLE_FORMING before reset
 
     public BullFlagBreakout(IBKRConnection ibkrConnection, Position position, RiskManager riskManager) {
         this.ibkrConnection = ibkrConnection;
@@ -480,8 +480,10 @@ public class BullFlagBreakout implements Strategy {
         scannerSubscription.belowPrice(20.0);
 
         List<TagValue> filterOptions = new ArrayList<>();
+        filterOptions.add(new TagValue("floatSharesBelow", "20000000")); // true low float: < 20M shares
+        filterOptions.add(new TagValue("volumeVsAvgAbove", "2"));        // 2× relative volume
 
-        log.debug("[BullFlagBreakout] Scanning with price=$1.50-$20, TOP_PERC_GAIN");
+        log.debug("[BullFlagBreakout] Scanning with floatSharesBelow=20M, volumeVsAvgAbove=2, price=$1.50-$20");
         return ibkrConnection.marketScan(scannerSubscription, filterOptions);
     }
 
